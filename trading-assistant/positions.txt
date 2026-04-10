@@ -1,0 +1,4 @@
+#ticker, name, shares, avg_cost, notes
+AVGO, Broadcom, 697, 53.44
+GOOGL, Google, 6, 296.56
+AMZN, Amazon, 10, 209.78
