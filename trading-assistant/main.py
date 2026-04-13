@@ -4,7 +4,7 @@ trading-assistant — CLI entry point
 
 Usage:
   python main.py login
-  python main.py report AAPL MSFT GOOG
+  python main.py report
   python main.py watch AAPL MSFT
   python main.py web
 """
@@ -18,9 +18,49 @@ def cmd_login(_args) -> None:
     login()
 
 
-def cmd_report(args) -> None:
+def cmd_report(_args) -> None:
+    _run_report()
+
+
+def _run_report() -> None:
+    """Generate and open the morning report (shared by `report` and `kickoff`)."""
+    import itertools
+    import json
+    import os
+    import threading
+    from datetime import date
+
     from report.generator import generate_morning_report
-    print(generate_morning_report(args.symbols))
+    from report.html_writer import write_html_report
+
+    done = threading.Event()
+
+    def _spinner() -> None:
+        for ch in itertools.cycle("|/-\\"):
+            if done.is_set():
+                break
+            print(f"\r  Generating report... {ch}", end="", flush=True)
+            done.wait(0.1)
+        print("\r  Report generated.          ")
+
+    t = threading.Thread(target=_spinner, daemon=True)
+    t.start()
+    try:
+        report = generate_morning_report()
+    finally:
+        done.set()
+        t.join()
+
+    today_str = date.today().strftime("%Y-%m-%d")
+    os.makedirs("./reports", exist_ok=True)
+
+    json_path = f"./reports/{today_str}.json"
+    with open(json_path, "w", encoding="utf-8") as fh:
+        json.dump(report, fh, indent=2)
+
+    html_path = write_html_report(report)
+    print(f"  Saved JSON : {json_path}")
+    print(f"  Saved HTML : {html_path}")
 
 
 def cmd_watch(args) -> None:
@@ -57,6 +97,8 @@ def cmd_kickoff(args) -> None:
 
     print(f"Loaded {n_headlines} headlines, {n_positions} positions.")
 
+    _run_report()
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -69,8 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("login", help="Authenticate with E*TRADE via OAuth1")
 
     # report
-    p_report = sub.add_parser("report", help="Generate a morning report")
-    p_report.add_argument("symbols", nargs="+", metavar="SYMBOL")
+    sub.add_parser("report", help="Generate a morning report from stored headlines and positions")
 
     # watch
     p_watch = sub.add_parser("watch", help="Poll prices and trigger alerts")

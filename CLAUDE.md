@@ -31,9 +31,11 @@ cd trading-assistant
 python main.py login
 python main.py kickoff --headlines headlines/2026-04-10.txt --positions positions.txt
 python main.py kickoff --skip-auth --headlines headlines/2026-04-10.txt --positions positions.txt
-python main.py report AAPL MSFT
+python main.py report
 python main.py watch AAPL MSFT
 python main.py web
 ```
 
 The database defaults to `./data/trading.db`. Override with `DB_PATH` in `.env`.
+
+The `report` command requires `ANTHROPIC_API_KEY` in `.env` (see `.env.example`).
