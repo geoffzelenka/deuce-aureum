@@ -66,8 +66,21 @@ def _run_report() -> None:
 
 
 def cmd_monitor(args) -> None:
+    import os
+    import threading
     from monitor.watcher import monitor_from_report
-    monitor_from_report(interval_seconds=args.interval)
+
+    t = threading.Thread(
+        target=monitor_from_report,
+        kwargs={"interval_seconds": args.interval},
+        daemon=True,
+    )
+    t.start()
+
+    from web.app import run as run_web
+    port = int(os.getenv("WEB_PORT", "5000"))
+    print(f"  Dashboard: http://localhost:{port}")
+    run_web(host="0.0.0.0", port=port)
 
 
 def cmd_watch(args) -> None:
@@ -81,6 +94,8 @@ def cmd_web(args) -> None:
 
 
 def cmd_kickoff(args) -> None:
+    import os
+    import threading
     from datetime import date
     from auth.etrade_auth import get_session
     from store.db import (
@@ -108,7 +123,13 @@ def cmd_kickoff(args) -> None:
 
     if not args.no_monitor:
         from monitor.watcher import monitor_from_report
-        monitor_from_report()
+        t = threading.Thread(target=monitor_from_report, daemon=True)
+        t.start()
+
+    from web.app import run as run_web
+    port = int(os.getenv("WEB_PORT", "5000"))
+    print(f"  Dashboard: http://localhost:{port}")
+    run_web(host="0.0.0.0", port=port)
 
 
 def build_parser() -> argparse.ArgumentParser:

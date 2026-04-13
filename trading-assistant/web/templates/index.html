@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Trading Assistant</title>
+  <style>
+    :root {
+      --bg:           #0d1117;
+      --surface:      #161b22;
+      --surface2:     #21262d;
+      --border:       #30363d;
+      --text:         #e6edf3;
+      --text-muted:   #8b949e;
+      --green:        #3fb950;
+      --red:          #f85149;
+      --yellow:       #d29922;
+      --blue:         #58a6ff;
+      --accent:       #1f6feb;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 14px;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ---- Header ---- */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 0 20px;
+      height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+    header h1 { font-size: 15px; font-weight: 600; letter-spacing: 0.3px; }
+    header a {
+      color: var(--blue);
+      text-decoration: none;
+      font-size: 13px;
+    }
+    header a:hover { text-decoration: underline; }
+
+    /* ---- Three-panel grid ---- */
+    .grid {
+      display: grid;
+      grid-template-columns: 240px 1fr 300px;
+      gap: 14px;
+      padding: 14px;
+      flex: 1;
+      min-height: 0;
+    }
+
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .panel-header {
+      background: var(--surface2);
+      border-bottom: 1px solid var(--border);
+      padding: 9px 14px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: var(--text-muted);
+      flex-shrink: 0;
+    }
+
+    .panel-body {
+      padding: 14px;
+      overflow-y: auto;
+      flex: 1;
+    }
+
+    /* ---- Session panel ---- */
+    .session-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .dot {
+      width: 9px; height: 9px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .dot-green  { background: var(--green); box-shadow: 0 0 5px var(--green); }
+    .dot-red    { background: var(--red); }
+    .dot-yellow { background: var(--yellow); }
+
+    #session-label { font-weight: 600; }
+    #session-detail {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 14px;
+      line-height: 1.5;
+    }
+
+    .btn {
+      display: block;
+      width: 100%;
+      padding: 8px 14px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      text-align: center;
+    }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover { background: #388bfd; }
+    .btn-secondary {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      margin-top: 6px;
+    }
+    .btn-secondary:hover { background: var(--border); }
+
+    /* ---- Login modal ---- */
+    #login-modal {
+      display: none;
+      margin-top: 14px;
+    }
+    .login-step {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px;
+    }
+    .login-step p {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+      line-height: 1.5;
+    }
+    #auth-url-link {
+      display: block;
+      color: var(--blue);
+      font-size: 11px;
+      word-break: break-all;
+      margin-bottom: 10px;
+    }
+    #verifier-input {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text);
+      padding: 7px 10px;
+      font-size: 13px;
+      margin-bottom: 8px;
+    }
+    #verifier-input:focus { outline: none; border-color: var(--accent); }
+    #login-status {
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--text-muted);
+      min-height: 16px;
+    }
+
+    /* ---- Quote cards ---- */
+    .no-data {
+      color: var(--text-muted);
+      font-size: 13px;
+      text-align: center;
+      padding: 40px 20px;
+      line-height: 1.6;
+    }
+    .no-data code {
+      background: var(--surface2);
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-size: 12px;
+    }
+
+    .quote-card {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 14px;
+      margin-bottom: 12px;
+    }
+    .quote-card:last-child { margin-bottom: 0; }
+
+    .qc-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 10px;
+    }
+    .qc-ticker { font-size: 17px; font-weight: 700; letter-spacing: 1px; }
+    .qc-price  { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+    .qc-meta {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px 12px;
+      margin-bottom: 10px;
+    }
+    .meta-item { font-size: 12px; }
+    .meta-label { color: var(--text-muted); }
+    .meta-val   { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+    .signals { display: flex; flex-wrap: wrap; gap: 6px; }
+
+    .badge {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 3px 8px;
+      border-radius: 4px;
+      transition: opacity 0.2s;
+    }
+    .badge-entry  { background: rgba(63,185,80,0.12);  color: var(--green); border: 1px solid rgba(63,185,80,0.35); }
+    .badge-profit { background: rgba(88,166,255,0.12); color: var(--blue);  border: 1px solid rgba(88,166,255,0.35); }
+    .badge-stop   { background: rgba(248,81,73,0.12);  color: var(--red);   border: 1px solid rgba(248,81,73,0.35); }
+    .active   { opacity: 1; }
+    .inactive { opacity: 0.30; }
+
+    .qc-footer {
+      font-size: 11px;
+      color: var(--text-muted);
+      text-align: right;
+      margin-top: 8px;
+    }
+
+    /* ---- Alerts panel ---- */
+    .alert-item {
+      border-left: 3px solid var(--border);
+      background: var(--surface2);
+      border-radius: 0 4px 4px 0;
+      padding: 7px 10px;
+      margin-bottom: 7px;
+      font-size: 12px;
+      font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+      word-break: break-word;
+      line-height: 1.4;
+    }
+    .alert-item:last-child { margin-bottom: 0; }
+    .alert-entry  { border-left-color: var(--green); }
+    .alert-profit { border-left-color: var(--blue); }
+    .alert-stop   { border-left-color: var(--red); }
+
+    /* ---- Responsive ---- */
+    @media (max-width: 860px) {
+      .grid {
+        grid-template-columns: 1fr;
+        height: auto;
+      }
+      .panel { min-height: 240px; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Trading Assistant</h1>
+  <a href="/report">Full Report &rarr;</a>
+</header>
+
+<div class="grid">
+
+  <!-- ============================================================
+       Left panel: session status
+  ============================================================ -->
+  <div class="panel">
+    <div class="panel-header">Session</div>
+    <div class="panel-body">
+      <div class="session-row">
+        <div class="dot dot-yellow" id="session-dot"></div>
+        <span id="session-label">Checking&hellip;</span>
+      </div>
+      <div id="session-detail"></div>
+
+      <button class="btn btn-primary" onclick="startLogin()">Re-login</button>
+
+      <div id="login-modal">
+        <div class="login-step">
+          <p>Open this URL in your browser to authorize access:</p>
+          <a id="auth-url-link" href="#" target="_blank" rel="noopener">—</a>
+          <p>Then paste the verifier code below:</p>
+          <input type="text" id="verifier-input" placeholder="Verifier code&hellip;" autocomplete="off" />
+          <button class="btn btn-primary" onclick="completeLogin()">Complete Login</button>
+          <button class="btn btn-secondary" onclick="cancelLogin()">Cancel</button>
+          <div id="login-status"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       Center panel: live price cards
+  ============================================================ -->
+  <div class="panel">
+    <div class="panel-header">Live Prices</div>
+    <div class="panel-body" id="quotes-body">
+      {% if not has_report %}
+      <div class="no-data">
+        <p>No report yet &mdash;<br>run <code>kickoff</code> first.</p>
+      </div>
+      {% else %}
+      <div class="no-data"><p>Waiting for first quote tick&hellip;</p></div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- ============================================================
+       Right panel: alerts feed
+  ============================================================ -->
+  <div class="panel">
+    <div class="panel-header">Recent Alerts</div>
+    <div class="panel-body" id="alerts-body">
+      <div class="no-data"><p>Loading&hellip;</p></div>
+    </div>
+  </div>
+
+</div><!-- .grid -->
+
+<script>
+"use strict";
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function fmt(n, d) {
+  if (n === null || n === undefined) return '—';
+  return Number(n).toFixed(d !== undefined ? d : 2);
+}
+
+function fmtVol(v) {
+  if (!v) return '—';
+  if (v >= 1e6) return (v / 1e6).toFixed(2) + 'M';
+  if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K';
+  return String(v);
+}
+
+// ── Session ───────────────────────────────────────────────────────────────────
+
+function updateSession() {
+  fetch('/api/session')
+    .then(r => r.json())
+    .then(d => {
+      const dot    = document.getElementById('session-dot');
+      const label  = document.getElementById('session-label');
+      const detail = document.getElementById('session-detail');
+      dot.className = 'dot';
+      if (d.logged_in) {
+        dot.classList.add('dot-green');
+        label.textContent = 'Logged In';
+        if (d.remaining_seconds !== null) {
+          const m = Math.floor(d.remaining_seconds / 60);
+          const s = d.remaining_seconds % 60;
+          detail.textContent = `Session expires in ${m}m ${s}s`;
+        }
+      } else {
+        dot.classList.add('dot-red');
+        label.textContent = 'Not Logged In';
+        detail.textContent = 'Click Re-login to authenticate with E\u2022TRADE.';
+      }
+    })
+    .catch(() => {
+      document.getElementById('session-label').textContent = 'Unavailable';
+    });
+}
+
+updateSession();
+setInterval(updateSession, 30_000);
+
+// ── Login flow ────────────────────────────────────────────────────────────────
+
+function setLoginStatus(msg) {
+  document.getElementById('login-status').textContent = msg;
+}
+
+function startLogin() {
+  document.getElementById('login-modal').style.display = 'block';
+  setLoginStatus('Requesting OAuth token…');
+  document.getElementById('auth-url-link').textContent = '—';
+  document.getElementById('auth-url-link').href = '#';
+  document.getElementById('verifier-input').value = '';
+
+  fetch('/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+    .then(r => r.json())
+    .then(d => {
+      if (d.auth_url) {
+        const link = document.getElementById('auth-url-link');
+        link.href = d.auth_url;
+        link.textContent = d.auth_url;
+        setLoginStatus('Authorize in your browser, then paste the verifier code here.');
+      } else {
+        setLoginStatus('Error: ' + (d.error || 'unknown'));
+      }
+    })
+    .catch(e => setLoginStatus('Request failed: ' + e));
+}
+
+function completeLogin() {
+  const verifier = document.getElementById('verifier-input').value.trim();
+  if (!verifier) { setLoginStatus('Please paste the verifier code first.'); return; }
+
+  setLoginStatus('Completing login…');
+  fetch('/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ verifier }),
+  })
+    .then(r => r.json())
+    .then(d => {
+      if (d.success) {
+        setLoginStatus('Login successful!');
+        setTimeout(() => {
+          document.getElementById('login-modal').style.display = 'none';
+          updateSession();
+        }, 1000);
+      } else {
+        setLoginStatus('Failed: ' + (d.error || 'unknown error'));
+      }
+    })
+    .catch(e => setLoginStatus('Request failed: ' + e));
+}
+
+function cancelLogin() {
+  document.getElementById('login-modal').style.display = 'none';
+  setLoginStatus('');
+}
+
+// ── Quotes ────────────────────────────────────────────────────────────────────
+
+function quoteCard(q) {
+  const price      = q.last_price;
+  const inEntry    = price !== null && q.entry_low  > 0 && price <= q.entry_low;
+  const atProfit   = price !== null && q.profit_target !== null && price >= q.profit_target;
+  const atStop     = price !== null && q.stop_loss    !== null && price <= q.stop_loss;
+
+  const entryLabel = (q.entry_low > 0 && q.entry_high > 0)
+    ? `Entry $${fmt(q.entry_low)}&ndash;$${fmt(q.entry_high)}`
+    : 'Entry n/a';
+  const profitLabel = q.profit_target !== null ? `Target $${fmt(q.profit_target)}` : 'Target n/a';
+  const stopLabel   = q.stop_loss    !== null ? `Stop $${fmt(q.stop_loss)}`    : 'Stop n/a';
+
+  return `
+<div class="quote-card">
+  <div class="qc-top">
+    <span class="qc-ticker">${q.ticker}</span>
+    <span class="qc-price">${price !== null ? '$' + fmt(price) : '—'}</span>
+  </div>
+  <div class="qc-meta">
+    <div class="meta-item"><span class="meta-label">Bid </span><span class="meta-val">$${fmt(q.bid)}</span></div>
+    <div class="meta-item"><span class="meta-label">Ask </span><span class="meta-val">$${fmt(q.ask)}</span></div>
+    <div class="meta-item"><span class="meta-label">Volume </span><span class="meta-val">${fmtVol(q.volume)}</span></div>
+    <div class="meta-item"><span class="meta-label">Updated </span><span class="meta-val">${q.updated_at || '—'}</span></div>
+  </div>
+  <div class="signals">
+    <span class="badge badge-entry  ${inEntry  ? 'active' : 'inactive'}">${entryLabel}</span>
+    <span class="badge badge-profit ${atProfit ? 'active' : 'inactive'}">${profitLabel}</span>
+    <span class="badge badge-stop   ${atStop   ? 'active' : 'inactive'}">${stopLabel}</span>
+  </div>
+</div>`;
+}
+
+function updateQuotes() {
+  fetch('/api/quotes')
+    .then(r => r.json())
+    .then(data => {
+      const body    = document.getElementById('quotes-body');
+      const tickers = Object.keys(data);
+      if (tickers.length === 0) return; // keep placeholder
+      body.innerHTML = tickers.map(t => quoteCard(data[t])).join('');
+    })
+    .catch(e => console.warn('Quotes fetch failed:', e));
+}
+
+updateQuotes();
+setInterval(updateQuotes, 10_000);
+
+// ── Alerts ────────────────────────────────────────────────────────────────────
+
+function alertClass(line) {
+  if (line.includes('ENTRY'))         return 'alert-entry';
+  if (line.includes('PROFIT_TARGET')) return 'alert-profit';
+  if (line.includes('STOP_LOSS'))     return 'alert-stop';
+  return '';
+}
+
+function updateAlerts() {
+  fetch('/api/alerts')
+    .then(r => r.json())
+    .then(lines => {
+      const body = document.getElementById('alerts-body');
+      if (!lines.length) {
+        body.innerHTML = '<div class="no-data"><p>No alerts yet.</p></div>';
+        return;
+      }
+      body.innerHTML = [...lines].reverse()
+        .map(l => `<div class="alert-item ${alertClass(l)}">${l}</div>`)
+        .join('');
+    })
+    .catch(e => console.warn('Alerts fetch failed:', e));
+}
+
+updateAlerts();
+setInterval(updateAlerts, 15_000);
+</script>
+</body>
+</html>

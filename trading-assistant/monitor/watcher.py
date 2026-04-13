@@ -9,6 +9,7 @@ and firing entry/exit alerts via alerts.notifier.
 import json
 import os
 import re
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -18,6 +19,13 @@ from typing import Optional
 import config
 from auth.etrade_auth import get_session
 from alerts.notifier import send_alert
+
+# ---------------------------------------------------------------------------
+# Shared quote cache — written by the watcher, read by the Flask web UI
+# ---------------------------------------------------------------------------
+
+quote_cache: dict[str, dict] = {}
+_cache_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Thresholds — all overridable via .env
@@ -97,9 +105,19 @@ def _fetch_quotes(session, symbols: list[str]) -> list[dict]:
     """
     url = f"{config.BASE_URL}/v1/market/quote/{','.join(symbols)}"
     try:
-        resp = session.get(url, params={"detailFlag": "ALL"}, timeout=10)
+        resp = session.get(
+            url,
+            params={"detailFlag": "ALL"},
+            headers={"Accept": "application/json"},
+            timeout=10,
+        )
         resp.raise_for_status()
-        return resp.json().get("QuoteResponse", {}).get("QuoteData", [])
+        try:
+            return resp.json().get("QuoteResponse", {}).get("QuoteData", [])
+        except Exception as exc:
+            print(f"  [warn] Quote fetch failed (JSON parse): {exc}")
+            print(f"  [warn] Response body: {resp.text[:300]}")
+            return []
     except Exception as exc:
         print(f"  [warn] Quote fetch failed: {exc}")
         return []
@@ -195,6 +213,27 @@ def _check_signals(state: TickerState) -> None:
     state.volume_history.append(volume)
 
 
+def _write_cache(state: "TickerState") -> None:
+    """Snapshot the latest TickerState into quote_cache for the web dashboard."""
+    entry_low = state.entry_low
+    profit_target = round(entry_low * (1 + PROFIT_TARGET_PCT / 100), 2) if entry_low > 0 else None
+    stop_loss = round(entry_low * (1 - STOP_LOSS_PCT / 100), 2) if entry_low > 0 else None
+    snapshot = {
+        "ticker": state.ticker,
+        "last_price": state.last_price,
+        "bid": state.bid,
+        "ask": state.ask,
+        "volume": state.volume,
+        "entry_low": entry_low,
+        "entry_high": state.entry_high,
+        "profit_target": profit_target,
+        "stop_loss": stop_loss,
+        "updated_at": time.strftime("%H:%M:%S"),
+    }
+    with _cache_lock:
+        quote_cache[state.ticker] = snapshot
+
+
 def _print_status(states: dict[str, "TickerState"]) -> None:
     timestamp = time.strftime("%H:%M:%S")
     parts = []
@@ -252,6 +291,7 @@ def watch(
                     if sym in states:
                         _update_state(states[sym], qd)
                         _check_signals(states[sym])
+                        _write_cache(states[sym])
                 _print_status(states)
             except RuntimeError as exc:
                 print(f"  [error] {exc}")

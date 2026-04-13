@@ -1,3 +1,196 @@
 # deuce-aureum
-no thoughts, just vibes
-Stock market strategizer
+
+Stock market trading assistant — E*TRADE quote monitoring, Claude-powered morning reports, and a live web dashboard.
+
+---
+
+## Setup
+
+```bash
+# Create and activate the virtual environment
+source .venv/bin/activate
+pip install -r trading-assistant/requirements.txt
+
+# Copy and fill in credentials
+cp .env.example .env
+```
+
+Required `.env` values:
+
+| Variable | Description |
+|---|---|
+| `ETRADE_CONSUMER_KEY` | From [developer.etrade.com](https://developer.etrade.com) |
+| `ETRADE_CONSUMER_SECRET` | From [developer.etrade.com](https://developer.etrade.com) |
+| `ETRADE_ENV` | `sandbox` or `production` |
+| `ANTHROPIC_API_KEY` | From [console.anthropic.com](https://console.anthropic.com) |
+
+Optional `.env` values:
+
+| Variable | Default | Description |
+|---|---|---|
+| `DB_PATH` | `./data/trading.db` | SQLite database path |
+| `VOLUME_SPIKE_FACTOR` | `1.5` | Entry signal: volume must exceed N × 5-period average |
+| `PROFIT_TARGET_PCT` | `2.0` | Exit signal: % gain above entry_low |
+| `STOP_LOSS_PCT` | `1.0` | Exit signal: % loss below entry_low |
+| `WEB_PORT` | `5000` | Web dashboard port |
+
+---
+
+## End-to-end workflow
+
+### 1. Authenticate with E*TRADE
+
+```bash
+cd trading-assistant
+python main.py login
+```
+
+Runs the three-legged OAuth1 flow:
+
+1. Fetches a request token from E*TRADE
+2. Prints an authorization URL — open it in your browser, log in, and E*TRADE shows you a verifier code
+3. Paste the verifier back into the terminal to complete the exchange
+
+The session token is saved to `./data/session.json` and reloaded automatically on the next command, so you don't need to re-run `login` between `login` and `kickoff`. The session expires 115 minutes after the original login regardless of restarts. Delete `session.json` or run `login` again to start a new session.
+
+---
+
+### 2. Prepare input files
+
+**Headlines file** — one headline per line, plain text:
+
+```
+LMT wins $4.76B Army contract for Patriot missile systems
+Fed signals two rate cuts in 2026 amid cooling inflation
+AMZN announces $25B Mississippi data center investment
+```
+
+**Positions file** — CSV with `ticker` and `shares` columns:
+
+```
+ticker,shares
+AMZN,10
+NVDA,5
+```
+
+---
+
+### 3. Run kickoff
+
+```bash
+python main.py kickoff --headlines headlines/2026-04-13.txt --positions positions.txt
+```
+
+This does four things in order:
+
+1. **Validates the E*TRADE session** — raises immediately if not logged in or expired
+2. **Loads data** — parses the headlines and positions files into SQLite (`./data/trading.db`)
+3. **Generates the morning report** — sends headlines and positions to Claude, which returns structured JSON with top plays, position outlooks, and long-term entry ideas. Saved to:
+   - `./reports/YYYY-MM-DD.json` — machine-readable, used by the watcher
+   - `./reports/YYYY-MM-DD.html` — styled report, served at `/report` in the dashboard
+4. **Starts the watcher + web dashboard** — the watcher runs in a background thread polling E*TRADE every 60 seconds; Flask starts in the foreground at `http://localhost:5000`
+
+Flags:
+
+```bash
+python main.py kickoff --skip-auth   ...   # skip the session check (e.g. sandbox testing)
+python main.py kickoff --no-monitor  ...   # start Flask only, no watcher thread
+```
+
+---
+
+### 4. Monitor signals
+
+The watcher loads the top 3 tickers from the report and polls E*TRADE's quote API on each interval. For each ticker it tracks:
+
+- Last price, bid, ask, volume
+- 5-minute rolling price high/low
+- 5-period volume moving average
+
+Three signals are checked each tick:
+
+| Signal | Condition |
+|---|---|
+| **ENTRY** | Price ≤ entry_low AND volume > `VOLUME_SPIKE_FACTOR` × 5-period average |
+| **PROFIT_TARGET** | Price ≥ entry_low × (1 + `PROFIT_TARGET_PCT` / 100) |
+| **STOP_LOSS** | Price ≤ entry_low × (1 − `STOP_LOSS_PCT` / 100) |
+
+When a signal fires:
+- Rich-formatted output in the terminal
+- Desktop notification (via `plyer`)
+- Audio alert (TTS via `say` / `spd-say`, or system beep fallback)
+- Line appended to `./logs/alerts.log`
+
+Signals are debounced — the same ticker/signal pair won't re-fire within 5 minutes.
+
+---
+
+### 5. Web dashboard
+
+Open `http://localhost:5000` in your browser.
+
+**Left panel — Session status**
+- Green dot + countdown when logged in; red when not
+- "Re-login" button runs the OAuth flow inline without touching the terminal:
+  1. Click Re-login → an authorization URL appears; open it in your browser
+  2. Paste the verifier code into the field and click Complete Login
+
+**Center panel — Live prices** *(auto-refreshes every 10 seconds)*
+- One card per monitored ticker showing last price, bid, ask, volume, and last-updated time
+- Three signal badges (Entry zone / Profit target / Stop loss) — highlighted when the current price crosses the threshold, dimmed otherwise
+
+**Right panel — Alerts feed** *(auto-refreshes every 15 seconds)*
+- Last 50 alerts from `./logs/alerts.log`, newest first
+- Color-coded by signal type: green = ENTRY, blue = PROFIT_TARGET, red = STOP_LOSS
+
+`GET /report` renders today's full HTML report inline.
+
+---
+
+## Other commands
+
+```bash
+# Generate a report without loading new data
+python main.py report
+
+# Start the watcher + dashboard without re-running kickoff
+# (session is reloaded from data/session.json automatically)
+python main.py monitor
+python main.py monitor --interval 30
+
+# Watch specific tickers (no report needed)
+python main.py watch AAPL MSFT
+
+# Start the dashboard only (no watcher)
+python main.py web
+```
+
+---
+
+## Running tests
+
+```bash
+source .venv/bin/activate
+cd trading-assistant
+python -m pytest tests/
+```
+
+---
+
+## Project structure
+
+```
+trading-assistant/
+├── auth/           # E*TRADE OAuth1 flow
+├── alerts/         # Multi-channel alert dispatch (terminal, desktop, TTS, log)
+├── monitor/        # Quote polling loop and shared quote_cache for the web UI
+├── report/         # Claude API call, JSON parsing, HTML report writer
+├── store/          # SQLite helpers (headlines, positions)
+├── web/            # Flask dashboard (app.py + templates/index.html)
+├── headlines/      # Input headline files
+├── reports/        # Generated JSON + HTML reports
+├── logs/           # alerts.log
+├── data/           # trading.db, session.json (gitignored)
+├── main.py         # CLI entry point
+└── config.py       # Environment / API config
+```

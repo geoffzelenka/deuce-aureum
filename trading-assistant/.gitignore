@@ -1,5 +1,6 @@
 .env
 *.db
+data/session.json
 __pycache__/
 *.py[cod]
 .venv/
