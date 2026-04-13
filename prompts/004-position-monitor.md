@@ -16,7 +16,7 @@ In the `trading-assistant` project, implement the real-time position monitor.
 - Implement three alert channels, all triggered together on a signal:
   1. Terminal: print a formatted, color-coded line using `rich` library. Green for entry, red for stop-loss, yellow for profit target.
   2. Desktop notification: use `plyer` library (`plyer.notification.notify`). Title should be the ticker and signal type. Falls back gracefully if `plyer` is unavailable.
-  3. Sound: play a short system beep using `winsound` on Windows, `afplay` on macOS (via subprocess), or `aplay` on Linux. Use different beep patterns for entry vs exit.
+  3. Sound: use system TTS to speak the alert type followed by the ticker letters individually (e.g. "Entry. L M T"). Use `spd-say -w` on Linux, `say` on macOS, PowerShell SAPI on Windows. Fall back to a beep (`winsound` / `afplay` / `aplay`) if TTS is unavailable.
 - Log every alert to `./logs/alerts.log` with timestamp, ticker, signal type, price, and reason.
 - Debounce: do not re-fire the same signal for the same ticker within 5 minutes.
 

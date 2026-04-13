@@ -5,6 +5,7 @@ trading-assistant — CLI entry point
 Usage:
   python main.py login
   python main.py report
+  python main.py monitor
   python main.py watch AAPL MSFT
   python main.py web
 """
@@ -61,6 +62,12 @@ def _run_report() -> None:
     html_path = write_html_report(report)
     print(f"  Saved JSON : {json_path}")
     print(f"  Saved HTML : {html_path}")
+    return report
+
+
+def cmd_monitor(args) -> None:
+    from monitor.watcher import monitor_from_report
+    monitor_from_report(interval_seconds=args.interval)
 
 
 def cmd_watch(args) -> None:
@@ -99,6 +106,10 @@ def cmd_kickoff(args) -> None:
 
     _run_report()
 
+    if not args.no_monitor:
+        from monitor.watcher import monitor_from_report
+        monitor_from_report()
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -112,6 +123,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     # report
     sub.add_parser("report", help="Generate a morning report from stored headlines and positions")
+
+    # monitor
+    p_monitor = sub.add_parser(
+        "monitor", help="Watch top-play tickers from today's report and fire alerts"
+    )
+    p_monitor.add_argument(
+        "--interval", type=int, default=60, metavar="SECONDS",
+        help="Polling interval in seconds (default: 60)",
+    )
 
     # watch
     p_watch = sub.add_parser("watch", help="Poll prices and trigger alerts")
@@ -132,6 +152,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_kickoff.add_argument("--headlines", metavar="PATH", help="Path to headlines file")
     p_kickoff.add_argument("--positions", metavar="PATH", help="Path to positions CSV")
     p_kickoff.add_argument("--skip-auth", action="store_true", help="Skip E*TRADE session check")
+    p_kickoff.add_argument(
+        "--no-monitor", action="store_true",
+        help="Skip starting the real-time monitor after the report is generated",
+    )
 
     return parser
 
@@ -143,6 +167,7 @@ def main() -> None:
     dispatch = {
         "login": cmd_login,
         "report": cmd_report,
+        "monitor": cmd_monitor,
         "watch": cmd_watch,
         "web": cmd_web,
         "kickoff": cmd_kickoff,
