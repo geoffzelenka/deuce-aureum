@@ -16,6 +16,36 @@ DEBOUNCE_SECONDS = 5 * 60  # 5 minutes
 _debounce_lock = threading.Lock()
 _last_fired: dict[tuple[str, str], float] = {}  # (ticker, signal_type) -> monotonic time
 
+_mute_lock = threading.Lock()
+_muted_tickers: set[str] = set()  # tickers whose alerts are currently silenced
+
+
+# ---------------------------------------------------------------------------
+# Mute / unmute public API
+# ---------------------------------------------------------------------------
+
+def mute_ticker(ticker: str) -> None:
+    """Silence all alerts for ``ticker`` until explicitly unmuted."""
+    with _mute_lock:
+        _muted_tickers.add(ticker.upper())
+
+
+def unmute_ticker(ticker: str) -> None:
+    """Re-enable alerts for ``ticker``."""
+    with _mute_lock:
+        _muted_tickers.discard(ticker.upper())
+
+
+def is_muted(ticker: str) -> bool:
+    with _mute_lock:
+        return ticker.upper() in _muted_tickers
+
+
+def get_muted() -> list[str]:
+    """Return a sorted list of currently muted tickers."""
+    with _mute_lock:
+        return sorted(_muted_tickers)
+
 LOG_DIR = "./logs"
 LOG_FILE = os.path.join(LOG_DIR, "alerts.log")
 
@@ -165,8 +195,11 @@ def send_alert(ticker: str, signal_type: str, price: float, reason: str) -> None
     Fire an alert on all channels for `ticker`.
 
     signal_type: "ENTRY" | "PROFIT_TARGET" | "STOP_LOSS"
+    Suppressed when the ticker is muted.
     Debounced: the same (ticker, signal_type) pair will not re-fire within 5 minutes.
     """
+    if is_muted(ticker):
+        return
     if _is_debounced(ticker, signal_type):
         return
 

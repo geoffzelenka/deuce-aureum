@@ -89,6 +89,34 @@ def api_session():
     })
 
 
+@app.route("/api/muted")
+def api_muted():
+    from alerts.notifier import get_muted
+    return jsonify(get_muted())
+
+
+@app.route("/api/mute", methods=["POST"])
+def api_mute():
+    from alerts.notifier import mute_ticker
+    body = request.get_json(silent=True) or {}
+    ticker = body.get("ticker", "").strip().upper()
+    if not ticker:
+        return jsonify({"error": "ticker required"}), 400
+    mute_ticker(ticker)
+    return jsonify({"muted": ticker})
+
+
+@app.route("/api/unmute", methods=["POST"])
+def api_unmute():
+    from alerts.notifier import unmute_ticker
+    body = request.get_json(silent=True) or {}
+    ticker = body.get("ticker", "").strip().upper()
+    if not ticker:
+        return jsonify({"error": "ticker required"}), 400
+    unmute_ticker(ticker)
+    return jsonify({"unmuted": ticker})
+
+
 @app.route("/api/login", methods=["POST"])
 def api_login():
     from auth.etrade_auth import start_login, complete_login

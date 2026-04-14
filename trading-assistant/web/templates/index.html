@@ -234,11 +234,64 @@
     .inactive { opacity: 0.30; }
 
     .qc-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 10px;
+      gap: 8px;
+    }
+    .qc-updated {
       font-size: 11px;
       color: var(--text-muted);
-      text-align: right;
-      margin-top: 8px;
     }
+
+    .btn-mute {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      cursor: pointer;
+      background: var(--surface2);
+      color: var(--text-muted);
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+      white-space: nowrap;
+    }
+    .btn-mute:hover {
+      background: rgba(248,81,73,0.12);
+      color: var(--red);
+      border-color: rgba(248,81,73,0.4);
+    }
+    .btn-mute.is-muted {
+      background: rgba(248,81,73,0.12);
+      color: var(--red);
+      border-color: rgba(248,81,73,0.4);
+    }
+    .btn-mute.is-muted:hover {
+      background: var(--surface2);
+      color: var(--text-muted);
+      border-color: var(--border);
+    }
+
+    .quote-card.is-muted {
+      opacity: 0.55;
+    }
+    .quote-card.is-muted .signals .badge {
+      opacity: 0.25 !important;
+    }
+    .muted-label {
+      display: none;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.6px;
+      text-transform: uppercase;
+      color: var(--red);
+      background: rgba(248,81,73,0.12);
+      border: 1px solid rgba(248,81,73,0.35);
+      border-radius: 3px;
+      padding: 2px 6px;
+    }
+    .quote-card.is-muted .muted-label { display: inline-block; }
 
     /* ---- Alerts panel ---- */
     .alert-item {
@@ -443,6 +496,46 @@ function cancelLogin() {
   setLoginStatus('');
 }
 
+// ── Mute state ───────────────────────────────────────────────────────────────
+
+const mutedTickers = new Set();
+
+function syncMuted() {
+  return fetch('/api/muted')
+    .then(r => r.json())
+    .then(tickers => {
+      mutedTickers.clear();
+      tickers.forEach(t => mutedTickers.add(t));
+    })
+    .catch(e => console.warn('Muted fetch failed:', e));
+}
+
+function toggleMute(ticker) {
+  const muted = mutedTickers.has(ticker);
+  const endpoint = muted ? '/api/unmute' : '/api/mute';
+  fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ticker }),
+  })
+    .then(r => r.json())
+    .then(() => {
+      if (muted) mutedTickers.delete(ticker); else mutedTickers.add(ticker);
+      applyMuteState(ticker);
+    })
+    .catch(e => console.warn('Mute toggle failed:', e));
+}
+
+function applyMuteState(ticker) {
+  const card = document.querySelector(`.quote-card[data-ticker="${ticker}"]`);
+  const btn  = document.querySelector(`.btn-mute[data-ticker="${ticker}"]`);
+  if (!card || !btn) return;
+  const muted = mutedTickers.has(ticker);
+  card.classList.toggle('is-muted', muted);
+  btn.classList.toggle('is-muted', muted);
+  btn.textContent = muted ? 'Unmute alerts' : 'Mute alerts';
+}
+
 // ── Quotes ────────────────────────────────────────────────────────────────────
 
 function quoteCard(q) {
@@ -450,6 +543,7 @@ function quoteCard(q) {
   const inEntry    = price !== null && q.entry_low  > 0 && price <= q.entry_low;
   const atProfit   = price !== null && q.profit_target !== null && price >= q.profit_target;
   const atStop     = price !== null && q.stop_loss    !== null && price <= q.stop_loss;
+  const muted      = mutedTickers.has(q.ticker);
 
   const entryLabel = (q.entry_low > 0 && q.entry_high > 0)
     ? `Entry $${fmt(q.entry_low)}&ndash;$${fmt(q.entry_high)}`
@@ -458,7 +552,7 @@ function quoteCard(q) {
   const stopLabel   = q.stop_loss    !== null ? `Stop $${fmt(q.stop_loss)}`    : 'Stop n/a';
 
   return `
-<div class="quote-card">
+<div class="quote-card${muted ? ' is-muted' : ''}" data-ticker="${q.ticker}">
   <div class="qc-top">
     <span class="qc-ticker">${q.ticker}</span>
     <span class="qc-price">${price !== null ? '$' + fmt(price) : '—'}</span>
@@ -473,6 +567,14 @@ function quoteCard(q) {
     <span class="badge badge-entry  ${inEntry  ? 'active' : 'inactive'}">${entryLabel}</span>
     <span class="badge badge-profit ${atProfit ? 'active' : 'inactive'}">${profitLabel}</span>
     <span class="badge badge-stop   ${atStop   ? 'active' : 'inactive'}">${stopLabel}</span>
+  </div>
+  <div class="qc-footer">
+    <span class="muted-label">Alerts muted</span>
+    <span class="qc-updated">${q.updated_at || ''}</span>
+    <button class="btn-mute${muted ? ' is-muted' : ''}" data-ticker="${q.ticker}"
+            onclick="toggleMute('${q.ticker}')">
+      ${muted ? 'Unmute alerts' : 'Mute alerts'}
+    </button>
   </div>
 </div>`;
 }
@@ -489,7 +591,7 @@ function updateQuotes() {
     .catch(e => console.warn('Quotes fetch failed:', e));
 }
 
-updateQuotes();
+syncMuted().then(updateQuotes);
 setInterval(updateQuotes, 10_000);
 
 // ── Alerts ────────────────────────────────────────────────────────────────────

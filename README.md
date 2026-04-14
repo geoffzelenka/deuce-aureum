@@ -85,7 +85,7 @@ This does four things in order:
 
 1. **Validates the E*TRADE session** — raises immediately if not logged in or expired
 2. **Loads data** — parses the headlines and positions files into SQLite (`./data/trading.db`)
-3. **Generates the morning report** — sends headlines and positions to Claude, which returns structured JSON with top plays, position outlooks, and long-term entry ideas. Saved to:
+3. **Generates the morning report** — runs an agentic Claude loop. Claude may call `get_quote` (live E*TRADE price) or `get_technicals` (SMA-20/50/200 + avg volume via Yahoo Finance) up to 3 times before producing structured JSON with top plays, position outlooks, and long-term entry ideas. Saved to:
    - `./reports/YYYY-MM-DD.json` — machine-readable, used by the watcher
    - `./reports/YYYY-MM-DD.html` — styled report, served at `/report` in the dashboard
 4. **Starts the watcher + web dashboard** — the watcher runs in a background thread polling E*TRADE every 60 seconds; Flask starts in the foreground at `http://localhost:5000`
@@ -138,12 +138,23 @@ Open `http://localhost:5000` in your browser.
 **Center panel — Live prices** *(auto-refreshes every 10 seconds)*
 - One card per monitored ticker showing last price, bid, ask, volume, and last-updated time
 - Three signal badges (Entry zone / Profit target / Stop loss) — highlighted when the current price crosses the threshold, dimmed otherwise
+- **"Mute alerts" button** — silences all alerts for that ticker until you click "Unmute alerts". Muted cards are dimmed and show an "Alerts muted" label. Mute state is in-memory and clears on restart.
 
 **Right panel — Alerts feed** *(auto-refreshes every 15 seconds)*
 - Last 50 alerts from `./logs/alerts.log`, newest first
 - Color-coded by signal type: green = ENTRY, blue = PROFIT_TARGET, red = STOP_LOSS
 
 `GET /report` renders today's full HTML report inline.
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/quotes` | Live quote snapshot (`{}` if watcher not running) |
+| `GET /api/alerts` | Last 50 lines of `./logs/alerts.log` |
+| `GET /api/session` | `{logged_in, remaining_seconds}` |
+| `POST /api/login` | Two-step OAuth1 login (see setup) |
+| `GET /api/muted` | List of currently muted tickers |
+| `POST /api/mute` | `{"ticker": "AAPL"}` — silence alerts for a ticker |
+| `POST /api/unmute` | `{"ticker": "AAPL"}` — re-enable alerts |
 
 ---
 
@@ -189,7 +200,7 @@ trading-assistant/
 ├── web/            # Flask dashboard (app.py + templates/index.html)
 ├── headlines/      # Input headline files
 ├── reports/        # Generated JSON + HTML reports
-├── logs/           # alerts.log
+├── logs/           # alerts.log, tool_calls.log
 ├── data/           # trading.db, session.json (gitignored)
 ├── main.py         # CLI entry point
 └── config.py       # Environment / API config

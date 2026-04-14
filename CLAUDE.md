@@ -62,9 +62,34 @@ Dashboard runs at `http://localhost:5000` by default. Override port with `WEB_PO
 - `POST /api/login` — two-step OAuth1 login:
   - empty body → `{"auth_url": "..."}` (step 1: get authorization URL)
   - `{"verifier": "..."}` → `{"success": true}` (step 2: complete login)
+- `GET /api/muted` — list of currently muted tickers
+- `POST /api/mute` — `{"ticker": "AAPL"}` → silence alerts for that ticker (in-memory, clears on restart)
+- `POST /api/unmute` — `{"ticker": "AAPL"}` → re-enable alerts
 
 The watcher writes quote snapshots to `monitor.watcher.quote_cache` (protected by `_cache_lock`).
 Flask reads from this dict on each `/api/quotes` request.
+
+## Report generation (agentic loop)
+
+`report/generator.py` uses an agentic tool-use loop. Claude may call two tools mid-analysis
+before producing the final JSON:
+
+- `get_quote` — fetches a live single-ticker quote from E*TRADE
+- `get_technicals` — computes SMA-20/50/200 and 30-day avg volume from Yahoo Finance
+  (stub implementation; RSI-14 returns `null` until a proper data source is integrated)
+
+Guardrails enforced in `generate_report()`:
+- **3-turn limit** — forces `end_turn` after 3 tool calls
+- **Ticker allow-list** — only tickers from positions or extracted from headlines are permitted
+- **Duplicate block** — same (tool, ticker) pair cannot be called twice per session
+- **5-second timeout** per E*TRADE call
+
+Every tool call attempt is logged to `./logs/tool_calls.log` (timestamp, ticker, tool name,
+turn number, allowed yes/no, elapsed ms, result summary).
+
+`generate_morning_report(etrade_session=None)` is the public entry point used by `main.py`.
+Pass an active `OAuth1Session` to enable live `get_quote` calls; omit it to run on headlines
+and positions alone.
 
 ## E*TRADE API notes
 
