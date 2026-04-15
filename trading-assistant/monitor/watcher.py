@@ -94,7 +94,8 @@ def _load_report_tickers() -> dict[str, tuple[float, float]]:
         try:
             result[ticker] = _parse_entry_range(play["entry_range"])
         except ValueError as e:
-            print(f"  Warning: skipping {ticker}: {e}")
+            print(f"  Warning: no entry range for {ticker} ({e}) — watching without signals")
+            result[ticker] = (0.0, 0.0)
     return result
 
 
@@ -179,35 +180,37 @@ def _check_signals(state: TickerState) -> None:
     else:
         vol_spike = False  # not enough history yet
 
-    # --- Entry signal ---
-    if price <= state.entry_low and vol_spike:
-        hi, lo = _rolling_high_low(state)
-        range_str = f" | 5m: ${lo:.2f}-${hi:.2f}" if (hi and lo) else ""
-        reason = (
-            f"price ${price:.2f} <= entry_low ${state.entry_low:.2f}"
-            f" | vol {volume:,} > {VOLUME_SPIKE_FACTOR}x avg {avg_vol:,.0f}"
-            f"{range_str}"
-        )
-        send_alert(state.ticker, "ENTRY", price, reason)
+    # --- Signals require a valid entry range (entry_low == 0 means none was parsed) ---
+    if state.entry_low > 0:
+        # --- Entry signal ---
+        if price <= state.entry_low and vol_spike:
+            hi, lo = _rolling_high_low(state)
+            range_str = f" | 5m: ${lo:.2f}-${hi:.2f}" if (hi and lo) else ""
+            reason = (
+                f"price ${price:.2f} <= entry_low ${state.entry_low:.2f}"
+                f" | vol {volume:,} > {VOLUME_SPIKE_FACTOR}x avg {avg_vol:,.0f}"
+                f"{range_str}"
+            )
+            send_alert(state.ticker, "ENTRY", price, reason)
 
-    # --- Exit signals (referenced from entry_low as the entry price anchor) ---
-    entry_ref = state.entry_low
+        # --- Exit signals (referenced from entry_low as the entry price anchor) ---
+        entry_ref = state.entry_low
 
-    profit_price = entry_ref * (1 + PROFIT_TARGET_PCT / 100)
-    if price >= profit_price:
-        reason = (
-            f"price ${price:.2f} >= profit target ${profit_price:.2f}"
-            f" (+{PROFIT_TARGET_PCT}% above ${entry_ref:.2f})"
-        )
-        send_alert(state.ticker, "PROFIT_TARGET", price, reason)
+        profit_price = entry_ref * (1 + PROFIT_TARGET_PCT / 100)
+        if price >= profit_price:
+            reason = (
+                f"price ${price:.2f} >= profit target ${profit_price:.2f}"
+                f" (+{PROFIT_TARGET_PCT}% above ${entry_ref:.2f})"
+            )
+            send_alert(state.ticker, "PROFIT_TARGET", price, reason)
 
-    stop_price = entry_ref * (1 - STOP_LOSS_PCT / 100)
-    if price <= stop_price:
-        reason = (
-            f"price ${price:.2f} <= stop loss ${stop_price:.2f}"
-            f" (-{STOP_LOSS_PCT}% below ${entry_ref:.2f})"
-        )
-        send_alert(state.ticker, "STOP_LOSS", price, reason)
+        stop_price = entry_ref * (1 - STOP_LOSS_PCT / 100)
+        if price <= stop_price:
+            reason = (
+                f"price ${price:.2f} <= stop loss ${stop_price:.2f}"
+                f" (-{STOP_LOSS_PCT}% below ${entry_ref:.2f})"
+            )
+            send_alert(state.ticker, "STOP_LOSS", price, reason)
 
     # Append current volume AFTER signal check — becomes "previous" on next tick
     state.volume_history.append(volume)
@@ -274,10 +277,13 @@ def watch(
     if entry_ranges:
         for sym, (low, high) in entry_ranges.items():
             if sym in states:
-                print(
-                    f"  {sym}: entry ${low:.2f}–${high:.2f} | "
-                    f"profit_target +{PROFIT_TARGET_PCT}% | stop_loss -{STOP_LOSS_PCT}%"
-                )
+                if low > 0:
+                    print(
+                        f"  {sym}: entry ${low:.2f}–${high:.2f} | "
+                        f"profit_target +{PROFIT_TARGET_PCT}% | stop_loss -{STOP_LOSS_PCT}%"
+                    )
+                else:
+                    print(f"  {sym}: watching without signals (no entry range)")
     print()
 
     try:
