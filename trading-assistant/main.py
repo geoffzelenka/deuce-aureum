@@ -19,11 +19,11 @@ def cmd_login(_args) -> None:
     login()
 
 
-def cmd_report(_args) -> None:
-    _run_report()
+def cmd_report(args) -> None:
+    _run_report(debug=args.debug)
 
 
-def _run_report() -> None:
+def _run_report(debug: bool = False) -> None:
     """Generate and open the morning report (shared by `report` and `kickoff`)."""
     import itertools
     import json
@@ -47,7 +47,7 @@ def _run_report() -> None:
     t = threading.Thread(target=_spinner, daemon=True)
     t.start()
     try:
-        report = generate_morning_report()
+        report = generate_morning_report(debug=debug)
     finally:
         done.set()
         t.join()
@@ -119,7 +119,7 @@ def cmd_kickoff(args) -> None:
 
     print(f"Loaded {n_headlines} headlines, {n_positions} positions.")
 
-    _run_report()
+    _run_report(debug=args.debug)
 
     if not args.no_monitor:
         from monitor.watcher import monitor_from_report
@@ -143,7 +143,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("login", help="Authenticate with E*TRADE via OAuth1")
 
     # report
-    sub.add_parser("report", help="Generate a morning report from stored headlines and positions")
+    p_report = sub.add_parser("report", help="Generate a morning report from stored headlines and positions")
+    p_report.add_argument("--debug", action="store_true", help="Log full Claude conversation to logs/report_conversation_{date}.log")
 
     # monitor
     p_monitor = sub.add_parser(
@@ -177,6 +178,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-monitor", action="store_true",
         help="Skip starting the real-time monitor after the report is generated",
     )
+    p_kickoff.add_argument("--debug", action="store_true", help="Log full Claude conversation to logs/report_conversation_{date}.log")
 
     return parser
 

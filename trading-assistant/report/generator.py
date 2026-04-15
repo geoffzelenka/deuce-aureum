@@ -22,7 +22,7 @@ from store import db
 load_dotenv()
 
 # ---------------------------------------------------------------------------
-# Logging — tool call audit trail
+# Logging — tool call audit trail + optional conversation debug log
 # ---------------------------------------------------------------------------
 
 os.makedirs("./logs", exist_ok=True)
@@ -32,6 +32,91 @@ if not _tool_logger.handlers:
     _handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
     _tool_logger.addHandler(_handler)
     _tool_logger.setLevel(logging.INFO)
+
+
+def _conversation_log_path() -> str:
+    return f"./logs/report_conversation_{date.today().strftime('%Y-%m-%d')}.log"
+
+
+def _write_conversation_log(lines: list[str]) -> None:
+    """Overwrite today's conversation log with the current content."""
+    with open(_conversation_log_path(), "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
+def _format_conversation(messages: list, turns: int, finished: bool) -> list[str]:
+    """
+    Render the messages list as human-readable lines for the debug log.
+    Each API round-trip is labelled by turn number.
+    """
+    SEP = "=" * 80
+    out = [
+        SEP,
+        f"REPORT CONVERSATION — {date.today().isoformat()}  "
+        f"(logged {time.strftime('%H:%M:%S')})",
+        SEP,
+        "",
+    ]
+
+    tool_turn = 0  # counts tool-call rounds
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        role = msg["role"]
+        content = msg["content"]
+
+        if role == "user":
+            if i == 0:
+                # Initial prompt — show a truncated version so the log stays readable
+                text = content if isinstance(content, str) else str(content)
+                preview = text[:800] + (" …[truncated]" if len(text) > 800 else "")
+                out += [f"[INITIAL USER PROMPT]", preview, ""]
+            else:
+                # Tool results
+                out.append(f"[TURN {tool_turn - 1} — TOOL RESULTS]")
+                items = content if isinstance(content, list) else [{"content": content}]
+                for item in items:
+                    tid = item.get("tool_use_id", "—")
+                    result = item.get("content", "")
+                    out.append(f"  tool_use_id: {tid}")
+                    out.append(f"  result     : {result}")
+                out.append("")
+
+        elif role == "assistant":
+            blocks = content if isinstance(content, list) else []
+            stop_label = ""  # filled in below when we know stop_reason
+
+            text_blocks = [b for b in blocks if getattr(b, "type", None) == "text"]
+            tool_blocks = [b for b in blocks if getattr(b, "type", None) == "tool_use"]
+            stop_reason = "tool_use" if tool_blocks else "end_turn"
+
+            if tool_blocks:
+                out.append(f"[TURN {tool_turn} — CLAUDE] stop_reason=tool_use")
+                tool_turn += 1
+            else:
+                out.append(f"[FINAL — CLAUDE] stop_reason=end_turn")
+
+            for tb in text_blocks:
+                text = tb.text.strip()
+                if text:
+                    out.append(f"  <text>")
+                    for line in text.splitlines():
+                        out.append(f"    {line}")
+                    out.append(f"  </text>")
+
+            for tb in tool_blocks:
+                out.append(f"  <tool_use id={tb.id!r} name={tb.name!r}>")
+                out.append(f"    {json.dumps(tb.input)}")
+                out.append(f"  </tool_use>")
+
+            out.append("")
+
+        i += 1
+
+    if finished:
+        out += [SEP, f"END — {turns} tool call turn(s)", SEP]
+
+    return out
 
 # ---------------------------------------------------------------------------
 # System prompt
@@ -365,6 +450,7 @@ def generate_report(
     headlines_text: str,
     positions: list[dict],
     etrade_session=None,
+    debug: bool = False,
 ) -> dict:
     """
     Generate a morning trading report using an agentic Claude loop with tool use.
@@ -378,6 +464,8 @@ def generate_report(
         etrade_session: Optional OAuth1Session for E*TRADE API calls.
             When None, tool calls return a graceful error and Claude proceeds
             with the data it has from headlines and positions.
+        debug: When True, write the full Claude conversation (requests, tool
+            calls, and tool results) to ./logs/report_conversation_{date}.log.
 
     Returns:
         Parsed report dict.
@@ -392,6 +480,9 @@ def generate_report(
 
     messages = [_build_initial_user_message(headlines_text, positions)]
 
+    if debug:
+        print(f"  [debug] conversation log → {_conversation_log_path()}")
+
     while turns <= MAX_TURNS:
         response = client.messages.create(
             model="claude-opus-4-5",
@@ -402,6 +493,11 @@ def generate_report(
         )
 
         messages.append({"role": "assistant", "content": response.content})
+
+        if debug:
+            _write_conversation_log(_format_conversation(
+                messages, turns, finished=(response.stop_reason == "end_turn")
+            ))
 
         if response.stop_reason == "end_turn":
             print(f"Report generated in {turns} tool call turns.")
@@ -454,6 +550,11 @@ def generate_report(
                 tools=[],  # no tools → forces end_turn
                 messages=list(messages),
             )
+            messages.append({"role": "assistant", "content": final.content})
+            if debug:
+                _write_conversation_log(_format_conversation(
+                    messages, turns, finished=True
+                ))
             print(f"Report generated in {turns} tool call turns.")
             return _parse_final_report(final)
 
@@ -463,12 +564,14 @@ def generate_report(
 # Public wrapper (backward-compatible with main.py)
 # ---------------------------------------------------------------------------
 
-def generate_morning_report(etrade_session=None) -> dict:
+def generate_morning_report(etrade_session=None, debug: bool = False) -> dict:
     """
     Fetch data from the database and run the agentic report loop.
 
     ``etrade_session`` is optional; if omitted, Claude still generates the
     report from headlines and positions without live quote data.
+    ``debug`` writes the full Claude conversation to
+    ./logs/report_conversation_{date}.log.
     """
     headlines = db.get_recent_headlines(days=7)
     positions = db.get_positions()
@@ -477,4 +580,4 @@ def generate_morning_report(etrade_session=None) -> dict:
         if headlines
         else "(no recent headlines stored)"
     )
-    return generate_report(headlines_text, positions, etrade_session)
+    return generate_report(headlines_text, positions, etrade_session, debug=debug)

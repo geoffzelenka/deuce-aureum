@@ -104,15 +104,35 @@ def get_positions(db_path: str = DB_PATH) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def parse_headlines_file(path: str) -> list[str]:
-    """Read a headlines file: one per line, skip blanks and # comments."""
+    """Read a headlines file: one per line.
+
+    Skips:
+    - Blank lines
+    - Lines starting with '#' (comments)
+    - Markdown section headers: lines whose text is entirely bold/italic
+      formatting, e.g. '**Company News**' or '**Defense / Energy**'
+
+    Cleans:
+    - Strips leading '- ' or '* ' bullet markers
+    """
+    import re
+    _MARKDOWN_HEADER = re.compile(r'^\*{1,2}[^*]+\*{1,2}$')
+
     lines = []
     with open(path, encoding="utf-8") as fh:
         for raw in fh:
-            line = raw.rstrip("\n")
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
+            stripped = raw.strip()
+            if not stripped:
                 continue
-            lines.append(stripped)
+            if stripped.startswith("#"):
+                continue
+            if _MARKDOWN_HEADER.match(stripped):
+                continue
+            # Strip leading bullet marker
+            if stripped.startswith("- ") or stripped.startswith("* "):
+                stripped = stripped[2:].strip()
+            if stripped:
+                lines.append(stripped)
     return lines
 
 

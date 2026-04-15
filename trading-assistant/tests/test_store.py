@@ -148,6 +148,44 @@ class TestParseHeadlinesFile:
         path = self._write(tmp_path, "")
         assert db.parse_headlines_file(path) == []
 
+    def test_strips_bullet_dash(self, tmp_path):
+        path = self._write(tmp_path, "- Fed raises rates\n- Markets tumble\n")
+        assert db.parse_headlines_file(path) == ["Fed raises rates", "Markets tumble"]
+
+    def test_strips_bullet_asterisk(self, tmp_path):
+        path = self._write(tmp_path, "* Fed raises rates\n")
+        assert db.parse_headlines_file(path) == ["Fed raises rates"]
+
+    def test_skips_markdown_bold_headers(self, tmp_path):
+        content = "**Company News**\nFed raises rates\n**Analyst Actions**\nMarkets tumble\n"
+        path = self._write(tmp_path, content)
+        assert db.parse_headlines_file(path) == ["Fed raises rates", "Markets tumble"]
+
+    def test_skips_markdown_italic_headers(self, tmp_path):
+        path = self._write(tmp_path, "*Notables*\nFed raises rates\n")
+        assert db.parse_headlines_file(path) == ["Fed raises rates"]
+
+    def test_keeps_inline_bold_in_headline(self, tmp_path):
+        # A headline that contains bold but is not purely a header should be kept
+        path = self._write(tmp_path, "$AAPL reports **record** earnings\n")
+        assert db.parse_headlines_file(path) == ["$AAPL reports **record** earnings"]
+
+    def test_real_world_format(self, tmp_path):
+        content = (
+            "**Headlines**\n"
+            "- $NVDA chips power new AI push\n"
+            "- Fed holds rates steady\n"
+            "**Company News**\n"
+            "**Technology**\n"
+            "$MSFT expands cloud capacity\n"
+        )
+        path = self._write(tmp_path, content)
+        assert db.parse_headlines_file(path) == [
+            "$NVDA chips power new AI push",
+            "Fed holds rates steady",
+            "$MSFT expands cloud capacity",
+        ]
+
 
 # ---------------------------------------------------------------------------
 # parse_positions_file
