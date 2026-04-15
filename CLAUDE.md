@@ -32,7 +32,9 @@ python main.py login
 python main.py kickoff --headlines headlines/2026-04-10.txt --positions positions.txt
 python main.py kickoff --skip-auth --headlines headlines/2026-04-10.txt --positions positions.txt
 python main.py kickoff --no-monitor --headlines headlines/2026-04-10.txt  # Flask only, no watcher
+python main.py kickoff --debug --headlines headlines/2026-04-10.txt --positions positions.txt
 python main.py report
+python main.py report --debug      # log full Claude conversation to logs/report_conversation_{date}.log
 python main.py monitor             # watcher thread + Flask dashboard
 python main.py monitor --interval 30
 python main.py watch AAPL MSFT
@@ -87,9 +89,28 @@ Guardrails enforced in `generate_report()`:
 Every tool call attempt is logged to `./logs/tool_calls.log` (timestamp, ticker, tool name,
 turn number, allowed yes/no, elapsed ms, result summary).
 
-`generate_morning_report(etrade_session=None)` is the public entry point used by `main.py`.
-Pass an active `OAuth1Session` to enable live `get_quote` calls; omit it to run on headlines
-and positions alone.
+`generate_morning_report(etrade_session=None, debug=False)` is the public entry point used by
+`main.py`. Pass an active `OAuth1Session` to enable live `get_quote` calls; omit it to run on
+headlines and positions alone. `debug=True` writes the full turn-by-turn Claude conversation to
+`./logs/report_conversation_{date}.log` (updated after every API round-trip).
+
+## Headlines file format
+
+`parse_headlines_file()` accepts free-form text files. It:
+- Skips blank lines and `#` comment lines
+- Skips pure Markdown section headers (e.g. `**Company News**`, `**Analyst Actions**`)
+- Strips leading `- ` or `* ` bullet markers from each line
+
+This means standard newsletter-style formats (bullet lists with bold section headers) parse
+cleanly without feeding formatting noise to Claude.
+
+## Watcher — tickers without a valid entry range
+
+When Claude returns a vague `entry_range` (e.g. `"current price on pullback"`), the regex
+parser raises `ValueError`. The ticker is **not skipped** — it is added to the watchlist with
+`entry_low=0`. All signal checks (ENTRY, PROFIT_TARGET, STOP_LOSS) are gated on
+`entry_low > 0`, so the ticker appears in the UI and receives live price updates but fires no
+alerts. The startup summary prints `watching without signals (no entry range)` for these.
 
 ## E*TRADE API notes
 

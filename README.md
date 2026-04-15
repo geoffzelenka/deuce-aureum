@@ -57,13 +57,28 @@ The session token is saved to `./data/session.json` and reloaded automatically o
 
 ### 2. Prepare input files
 
-**Headlines file** — one headline per line, plain text:
+**Headlines file** — one headline per line. Plain text, bullet lists, and newsletter-style
+formats with bold section headers are all accepted:
 
 ```
 LMT wins $4.76B Army contract for Patriot missile systems
 Fed signals two rate cuts in 2026 amid cooling inflation
 AMZN announces $25B Mississippi data center investment
 ```
+
+or:
+
+```
+**Top Stories**
+- LMT wins $4.76B Army contract for Patriot missile systems
+- Fed signals two rate cuts in 2026 amid cooling inflation
+
+**Analyst Actions**
+- AMZN raised to Buy at Goldman, PT $250
+```
+
+The parser strips `- `/`* ` bullet markers and skips pure Markdown section headers
+(`**...**`) so only the actual headline text reaches Claude.
 
 **Positions file** — CSV with `ticker` and `shares` columns:
 
@@ -95,6 +110,7 @@ Flags:
 ```bash
 python main.py kickoff --skip-auth   ...   # skip the session check (e.g. sandbox testing)
 python main.py kickoff --no-monitor  ...   # start Flask only, no watcher thread
+python main.py kickoff --debug       ...   # log full Claude conversation to logs/
 ```
 
 ---
@@ -122,6 +138,10 @@ When a signal fires:
 - Line appended to `./logs/alerts.log`
 
 Signals are debounced — the same ticker/signal pair won't re-fire within 5 minutes.
+
+If Claude returns a vague entry range (e.g. `"current price on pullback"`) that can't be
+parsed, the ticker is still watched and shown in the dashboard — it just fires no signals.
+The startup summary marks these as `watching without signals (no entry range)`.
 
 ---
 
@@ -163,6 +183,7 @@ Open `http://localhost:5000` in your browser.
 ```bash
 # Generate a report without loading new data
 python main.py report
+python main.py report --debug   # also write full Claude conversation to logs/
 
 # Start the watcher + dashboard without re-running kickoff
 # (session is reloaded from data/session.json automatically)
