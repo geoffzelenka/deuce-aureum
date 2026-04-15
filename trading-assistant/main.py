@@ -23,7 +23,7 @@ def cmd_report(args) -> None:
     _run_report(debug=args.debug)
 
 
-def _run_report(debug: bool = False) -> None:
+def _run_report(debug: bool = False, etrade_session=None) -> None:
     """Generate and open the morning report (shared by `report` and `kickoff`)."""
     import itertools
     import json
@@ -31,8 +31,16 @@ def _run_report(debug: bool = False) -> None:
     import threading
     from datetime import date
 
+    from auth.etrade_auth import get_session
     from report.generator import generate_morning_report
     from report.html_writer import write_html_report
+
+    if etrade_session is None:
+        # Called from `report` command — try to get a session but don't require one
+        try:
+            etrade_session = get_session()
+        except RuntimeError:
+            pass  # not logged in or expired — report runs without live quotes
 
     done = threading.Event()
 
@@ -47,7 +55,7 @@ def _run_report(debug: bool = False) -> None:
     t = threading.Thread(target=_spinner, daemon=True)
     t.start()
     try:
-        report = generate_morning_report(debug=debug)
+        report = generate_morning_report(etrade_session=etrade_session, debug=debug)
     finally:
         done.set()
         t.join()
@@ -103,8 +111,9 @@ def cmd_kickoff(args) -> None:
         parse_headlines_file, parse_positions_file,
     )
 
+    etrade_session = None
     if not args.skip_auth:
-        get_session()  # raises RuntimeError if not logged in / expired
+        etrade_session = get_session()  # raises RuntimeError if not logged in / expired
 
     n_headlines = 0
     if args.headlines:
@@ -119,7 +128,7 @@ def cmd_kickoff(args) -> None:
 
     print(f"Loaded {n_headlines} headlines, {n_positions} positions.")
 
-    _run_report(debug=args.debug)
+    _run_report(debug=args.debug, etrade_session=etrade_session)
 
     if not args.no_monitor:
         from monitor.watcher import monitor_from_report

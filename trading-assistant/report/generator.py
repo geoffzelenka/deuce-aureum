@@ -412,7 +412,7 @@ def _build_initial_user_message(headlines_text: str, positions: list[dict]) -> d
 
     content = (
         f"Today is {day_of_week}, {date_str}.\n\n"
-        f"RECENT HEADLINES (last 7 days):\n{headlines_text}\n\n"
+        f"TODAY'S HEADLINES:\n{headlines_text}\n\n"
         f"CURRENT POSITIONS:\n{positions_text}\n\n"
         f"Analyse the above and return a JSON object matching this schema exactly:\n"
         f"{_SCHEMA_DESCRIPTION}\n\n"
@@ -573,11 +573,11 @@ def generate_morning_report(etrade_session=None, debug: bool = False) -> dict:
     ``debug`` writes the full Claude conversation to
     ./logs/report_conversation_{date}.log.
     """
-    headlines = db.get_recent_headlines(days=7)
+    headlines = db.get_todays_headlines()
     positions = db.get_positions()
     headlines_text = (
         "\n".join(f"- {h}" for h in headlines)
         if headlines
-        else "(no recent headlines stored)"
+        else "(no headlines stored for today)"
     )
     return generate_report(headlines_text, positions, etrade_session, debug=debug)

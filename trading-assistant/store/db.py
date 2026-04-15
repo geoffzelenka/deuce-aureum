@@ -70,6 +70,18 @@ def get_recent_headlines(days: int = 7, db_path: str = DB_PATH) -> list[str]:
     return [r["text"] for r in rows]
 
 
+def get_todays_headlines(db_path: str = DB_PATH) -> list[str]:
+    """Return headline texts whose source_date is today."""
+    init_db(db_path)
+    today = date.today().isoformat()
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT text FROM headlines WHERE source_date = ? ORDER BY id",
+            (today,),
+        ).fetchall()
+    return [r["text"] for r in rows]
+
+
 def upsert_positions(rows: list[dict], db_path: str = DB_PATH) -> None:
     """Insert or replace positions keyed by ticker."""
     init_db(db_path)
