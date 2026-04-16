@@ -1,8 +1,13 @@
 """
 Morning report generator using the Anthropic Claude API with tool use.
 
-Uses an agentic loop that lets Claude request live E*TRADE market data
-(quotes and technicals) mid-analysis before producing the final JSON report.
+Two-phase agentic loop:
+  Phase 1 — SCAN:  Claude reads all headlines/positions and nominates up to
+                   10 candidate tickers without calling any tools.
+  Phase 2 — RESEARCH: For each candidate Claude calls get_quote then
+                   get_technicals (mandatory, in that order), then up to 2
+                   more free-choice calls from the three available tools.
+                   Hard caps: 4 calls per ticker, 40 calls total.
 """
 
 import json
@@ -10,14 +15,15 @@ import logging
 import os
 import re
 import time
+from dataclasses import dataclass, field
 from datetime import date
 
 import anthropic
-import requests
 from dotenv import load_dotenv
 
 import config
 from store import db
+from report.enricher import get_quote_data, get_technicals_data, get_options_flow_data
 
 load_dotenv()
 
@@ -44,21 +50,20 @@ def _write_conversation_log(lines: list[str]) -> None:
         fh.write("\n".join(lines) + "\n")
 
 
-def _format_conversation(messages: list, turns: int, finished: bool) -> list[str]:
+def _format_conversation(messages: list, phase: str, finished: bool) -> list[str]:
     """
     Render the messages list as human-readable lines for the debug log.
-    Each API round-trip is labelled by turn number.
     """
     SEP = "=" * 80
     out = [
         SEP,
         f"REPORT CONVERSATION — {date.today().isoformat()}  "
-        f"(logged {time.strftime('%H:%M:%S')})",
+        f"(logged {time.strftime('%H:%M:%S')})  phase={phase}",
         SEP,
         "",
     ]
 
-    tool_turn = 0  # counts tool-call rounds
+    tool_turn = 0
     i = 0
     while i < len(messages):
         msg = messages[i]
@@ -67,54 +72,55 @@ def _format_conversation(messages: list, turns: int, finished: bool) -> list[str
 
         if role == "user":
             if i == 0:
-                # Initial prompt — show a truncated version so the log stays readable
                 text = content if isinstance(content, str) else str(content)
                 preview = text[:800] + (" …[truncated]" if len(text) > 800 else "")
-                out += [f"[INITIAL USER PROMPT]", preview, ""]
-            else:
-                # Tool results
-                out.append(f"[TURN {tool_turn - 1} — TOOL RESULTS]")
-                items = content if isinstance(content, list) else [{"content": content}]
-                for item in items:
-                    tid = item.get("tool_use_id", "—")
-                    result = item.get("content", "")
-                    out.append(f"  tool_use_id: {tid}")
-                    out.append(f"  result     : {result}")
-                out.append("")
+                out += ["[INITIAL USER PROMPT]", preview, ""]
+            elif isinstance(content, str):
+                out += [f"[USER — phase transition]", content, ""]
+            elif isinstance(content, list):
+                # Could be tool results or a phase-transition text block
+                first = content[0] if content else {}
+                if isinstance(first, dict) and first.get("type") == "tool_result":
+                    out.append(f"[TURN {tool_turn - 1} — TOOL RESULTS]")
+                    for item in content:
+                        tid = item.get("tool_use_id", "—")
+                        result = item.get("content", "")
+                        out.append(f"  tool_use_id: {tid}")
+                        out.append(f"  result     : {result}")
+                    out.append("")
+                else:
+                    out += [f"[USER MESSAGE]", str(content), ""]
 
         elif role == "assistant":
             blocks = content if isinstance(content, list) else []
-            stop_label = ""  # filled in below when we know stop_reason
-
             text_blocks = [b for b in blocks if getattr(b, "type", None) == "text"]
             tool_blocks = [b for b in blocks if getattr(b, "type", None) == "tool_use"]
-            stop_reason = "tool_use" if tool_blocks else "end_turn"
 
             if tool_blocks:
                 out.append(f"[TURN {tool_turn} — CLAUDE] stop_reason=tool_use")
                 tool_turn += 1
             else:
-                out.append(f"[FINAL — CLAUDE] stop_reason=end_turn")
+                out.append("[FINAL — CLAUDE] stop_reason=end_turn")
 
             for tb in text_blocks:
                 text = tb.text.strip()
                 if text:
-                    out.append(f"  <text>")
+                    out.append("  <text>")
                     for line in text.splitlines():
                         out.append(f"    {line}")
-                    out.append(f"  </text>")
+                    out.append("  </text>")
 
             for tb in tool_blocks:
                 out.append(f"  <tool_use id={tb.id!r} name={tb.name!r}>")
                 out.append(f"    {json.dumps(tb.input)}")
-                out.append(f"  </tool_use>")
+                out.append("  </tool_use>")
 
             out.append("")
 
         i += 1
 
     if finished:
-        out += [SEP, f"END — {turns} tool call turn(s)", SEP]
+        out += [SEP, "END OF CONVERSATION", SEP]
 
     return out
 
@@ -128,12 +134,51 @@ _SYSTEM_PROMPT = (
     "and market positions. You cut through noise to identify high-probability setups "
     "and speak plainly about risks. Always return valid JSON with no markdown fences "
     "or any text outside the JSON object.\n\n"
-    "You have access to two tools: get_quote and get_technicals. Use them "
-    "sparingly — only when live data would materially change your analysis. "
-    "You are limited to 3 tool calls total. Do not request data for tickers "
-    "not mentioned in the headlines or positions. Do not call the same tool "
-    "for the same ticker more than once. When you have enough information, "
-    "stop calling tools and produce the final JSON report."
+
+    "TOOL USE GUIDANCE\n\n"
+
+    "You work in two phases:\n\n"
+
+    "PHASE 1 — SCAN (current phase when you first receive the prompt)\n"
+    "Read all headlines and positions. Identify up to 10 candidate tickers "
+    "that have a clear news catalyst worthy of investigation. Output your "
+    'candidates list in your response as a JSON block with key "candidates". '
+    "Do not call any tools in this phase. Be selective — only include tickers "
+    "where a catalyst is evident in the headlines or where a held position "
+    "warrants live data to assess.\n\n"
+
+    "PHASE 2 — RESEARCH (begins after candidates are confirmed)\n"
+    "For each candidate ticker you must follow this call order:\n"
+    "  1. get_quote — always first. Establishes whether the catalyst is "
+    "already priced in (stock already up/down significantly).\n"
+    "  2. get_technicals — always second. Confirms trend direction and "
+    "whether the setup has technical support.\n"
+    "  3 & 4. Your choice from get_quote, get_technicals, or get_options_flow. "
+    "Use get_options_flow for binary catalyst events (earnings, FDA, "
+    "merger votes, Fed decisions) to gauge smart money positioning. "
+    "Use a second get_quote if significant time has passed. Use a second "
+    "get_technicals only if the first result was ambiguous.\n\n"
+
+    "Budget rules:\n"
+    "- Maximum 4 tool calls per ticker.\n"
+    "- Maximum 40 tool calls total across all tickers.\n"
+    "- Do not call tools for tickers not in your confirmed candidates list.\n"
+    "- When your research on all candidates is complete, stop calling tools "
+    "and produce the final JSON report immediately.\n\n"
+
+    "RANKING GUIDANCE\n"
+    "After researching all candidates, rank your top 3 plays using this "
+    "priority order:\n"
+    "  1. Strongest unpriced catalyst (stock has not yet moved on the news)\n"
+    "  2. Options flow confirmation (unusual activity signals smart money "
+    "positioning ahead of you)\n"
+    "  3. Technical setup aligned with catalyst direction (trend, support, "
+    "moving averages confirm the trade)\n"
+    "  4. Clean risk narrative (one specific, avoidable risk — not generic)\n\n"
+
+    "A play with all four factors is a high-conviction pick. A play missing "
+    "factor 1 (catalyst already priced in) should be dropped regardless of "
+    "how good the technicals look."
 )
 
 _SCHEMA_DESCRIPTION = """{
@@ -208,7 +253,65 @@ GET_TECHNICALS_TOOL = {
     },
 }
 
-MAX_TURNS = 3
+GET_OPTIONS_FLOW_TOOL = {
+    "name": "get_options_flow",
+    "description": (
+        "Fetch options flow summary for a ticker: total call volume, total put "
+        "volume, put/call ratio, largest single options trade of the day "
+        "(strike, expiry, premium), and unusual activity flag (boolean). "
+        "Use this to gauge whether smart money is positioning directionally "
+        "ahead of a catalyst. Most useful when a headline suggests an "
+        "imminent binary event (earnings, FDA, merger vote)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "ticker": {"type": "string", "description": "Uppercase ticker, e.g. NVDA"}
+        },
+        "required": ["ticker"],
+    },
+}
+
+_ALL_TOOLS = [GET_QUOTE_TOOL, GET_TECHNICALS_TOOL, GET_OPTIONS_FLOW_TOOL]
+
+# Budget constants
+GLOBAL_MAX = 40
+PER_TICKER_MAX = 4
+
+# ---------------------------------------------------------------------------
+# TickerBudget
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TickerBudget:
+    ticker: str
+    calls_made: int = 0
+    quote_done: bool = False
+    technicals_done: bool = False
+
+    def can_call(self, tool_name: str) -> tuple[bool, str]:
+        if self.calls_made >= PER_TICKER_MAX:
+            return False, f"Budget exhausted for {self.ticker} ({PER_TICKER_MAX}/{PER_TICKER_MAX} calls used)."
+        if tool_name == "get_quote" and not self.quote_done:
+            return True, ""
+        if tool_name == "get_technicals" and not self.quote_done:
+            return False, f"Call get_quote for {self.ticker} before get_technicals."
+        if tool_name == "get_technicals" and not self.technicals_done:
+            return True, ""
+        if self.calls_made < 2:
+            return False, f"Complete mandatory calls (get_quote, get_technicals) for {self.ticker} first."
+        return True, ""
+
+    def record_call(self, tool_name: str) -> None:
+        self.calls_made += 1
+        if tool_name == "get_quote" and not self.quote_done:
+            self.quote_done = True
+        elif tool_name == "get_technicals":
+            self.technicals_done = True
+
+    @property
+    def budget_status(self) -> str:
+        return f"{self.calls_made}/{PER_TICKER_MAX} calls used"
 
 # ---------------------------------------------------------------------------
 # Allow-list builder
@@ -226,169 +329,84 @@ def build_allow_list(headlines_text: str, positions: list[dict]) -> set[str]:
     return allowed
 
 # ---------------------------------------------------------------------------
-# E*TRADE API helpers
-# ---------------------------------------------------------------------------
-
-def _fetch_etrade_quote(session, ticker: str) -> dict:
-    """Fetch a single-ticker quote from E*TRADE with a 5-second timeout."""
-    url = f"{config.BASE_URL}/v1/market/quote/{ticker}"
-    resp = session.get(
-        url,
-        params={"detailFlag": "ALL"},
-        headers={"Accept": "application/json"},
-        timeout=5,
-    )
-    resp.raise_for_status()
-    quote_data = resp.json().get("QuoteResponse", {}).get("QuoteData", [])
-    if not quote_data:
-        return {}
-    all_data = quote_data[0].get("All", {})
-    return {
-        "last_price": all_data.get("lastTrade") or all_data.get("last") or all_data.get("lastPrice"),
-        "bid": all_data.get("bid"),
-        "ask": all_data.get("ask"),
-        "volume": all_data.get("totalVolume") or all_data.get("volume"),
-        "day_high": all_data.get("high"),
-        "day_low": all_data.get("low"),
-        "prev_close": all_data.get("previousClose"),
-    }
-
-
-def _fetch_technicals_stub(ticker: str) -> dict:
-    """
-    Stub implementation of get_technicals.
-
-    Computes SMA-20, SMA-50, SMA-200, and average daily volume over 30 days
-    from Yahoo Finance's free chart API (no auth required).  RSI-14 is not
-    computed here and is returned as null; replace this stub once a proper
-    technical-data source is integrated.
-
-    The ``session`` parameter is accepted for API consistency but is unused.
-    """
-    import statistics
-
-    YF_URL = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-    # 1 year of daily bars covers SMA-200 comfortably
-    resp = requests.get(
-        YF_URL,
-        params={"interval": "1d", "range": "1y"},
-        headers={"User-Agent": "Mozilla/5.0"},
-        timeout=5,
-    )
-    resp.raise_for_status()
-    result = resp.json().get("chart", {}).get("result") or []
-    if not result:
-        return {"error": f"No chart data returned for {ticker}"}
-
-    closes = [c for c in result[0]["indicators"]["quote"][0]["close"] if c is not None]
-    volumes = [v for v in result[0]["indicators"]["quote"][0]["volume"] if v is not None]
-
-    def _sma(series: list[float], n: int) -> float | None:
-        window = series[-n:]
-        return round(statistics.mean(window), 4) if len(window) == n else None
-
-    return {
-        "ma20": _sma(closes, 20),
-        "ma50": _sma(closes, 50),
-        "ma200": _sma(closes, 200),
-        "avg_volume_30d": round(statistics.mean(volumes[-30:]), 0) if len(volumes) >= 30 else None,
-        "rsi14": None,  # stub — not yet computed
-        "data_source": "yahoo_finance_stub",
-        "bars_available": len(closes),
-    }
-
-# ---------------------------------------------------------------------------
 # Tool dispatch
 # ---------------------------------------------------------------------------
 
 def _log_tool_call(
     tool_name: str,
     ticker: str,
-    turn: int,
+    phase: str,
     allowed: bool,
     result_summary: str,
     elapsed_ms: int,
+    budget_status: str = "",
+    unusual_activity: bool | None = None,
 ) -> None:
+    extras = f" budget={budget_status!r}" if budget_status else ""
+    if unusual_activity is not None:
+        extras += f" unusual_activity={unusual_activity}"
     _tool_logger.info(
-        "tool=%s ticker=%s turn=%d allowed=%s elapsed_ms=%d result=%s",
+        "phase=%s tool=%s ticker=%s allowed=%s elapsed_ms=%d%s result=%s",
+        phase,
         tool_name,
         ticker,
-        turn,
         "yes" if allowed else "no",
         elapsed_ms,
+        extras,
         result_summary[:200],
     )
 
 
-def dispatch_tool_call(
-    block,
-    allowed_tickers: set,
-    seen_calls: set,
-    session,
-    turn: int,
-) -> str:
+def dispatch_tool_call(tool_name: str, ticker: str, etrade_session) -> str:
     """
-    Validate and execute a single tool-use block.
+    Execute a validated tool call.
 
-    Enforces:
-    - Ticker allow-list
-    - Duplicate-call guard
-    - 5-second E*TRADE timeout
+    Preconditions (enforced by the caller):
+    - ticker is in the session allow-list
+    - TickerBudget.can_call() returned (True, "")
+    - global total_calls < GLOBAL_MAX
 
-    Returns a string suitable for the ``content`` field of a tool_result block.
+    Returns a JSON string (or a plain-text error message) suitable for the
+    ``content`` field of a tool_result block.
     """
-    tool_name = block.name
-    ticker = (block.input or {}).get("ticker", "").upper().strip()
-    call_key = (tool_name, ticker)
+    if tool_name == "get_quote":
+        data = get_quote_data(ticker, etrade_session)
+    elif tool_name == "get_technicals":
+        data = get_technicals_data(ticker)
+    elif tool_name == "get_options_flow":
+        data = get_options_flow_data(ticker, etrade_session)
+    else:
+        data = {"error": f"Unknown tool: {tool_name}"}
 
-    # Allow-list check
-    if ticker not in allowed_tickers:
-        result = (
-            f"Ticker {ticker} is not in the approved list for this session. "
-            "Do not request it again."
-        )
-        _log_tool_call(tool_name, ticker, turn, allowed=False, result_summary=result, elapsed_ms=0)
-        return result
-
-    # Duplicate check
-    if call_key in seen_calls:
-        result = "You already have this data. Do not repeat tool calls."
-        _log_tool_call(tool_name, ticker, turn, allowed=True, result_summary=result, elapsed_ms=0)
-        return result
-
-    seen_calls.add(call_key)
-
-    # Execute with timeout
-    t0 = time.monotonic()
-    try:
-        if session is None:
-            data = {"error": "No E*TRADE session available — proceeding with headlines only."}
-        elif tool_name == "get_quote":
-            data = _fetch_etrade_quote(session, ticker)
-        elif tool_name == "get_technicals":
-            data = _fetch_technicals_stub(ticker)
-        else:
-            data = {"error": f"Unknown tool: {tool_name}"}
-
-        elapsed_ms = int((time.monotonic() - t0) * 1000)
-        result = json.dumps(data)
-        _log_tool_call(tool_name, ticker, turn, allowed=True, result_summary=result, elapsed_ms=elapsed_ms)
-        return result
-
-    except requests.exceptions.Timeout:
-        elapsed_ms = int((time.monotonic() - t0) * 1000)
-        result = f"E*TRADE quote timed out for {ticker}. Proceed without this data."
-        _log_tool_call(tool_name, ticker, turn, allowed=True, result_summary=result, elapsed_ms=elapsed_ms)
-        return result
-
-    except Exception as exc:
-        elapsed_ms = int((time.monotonic() - t0) * 1000)
-        result = f"E*TRADE API error for {ticker}: {str(exc)[:120]}"
-        _log_tool_call(tool_name, ticker, turn, allowed=True, result_summary=result, elapsed_ms=elapsed_ms)
-        return result
+    return json.dumps(data)
 
 # ---------------------------------------------------------------------------
-# Message / response helpers
+# Candidate parsing
+# ---------------------------------------------------------------------------
+
+def parse_candidates(response) -> list[str]:
+    """
+    Extract the candidates list from a Phase 1 scan response.
+
+    Looks for a JSON snippet containing ``"candidates": [...]`` anywhere in
+    the first text block of the response.  Returns up to 10 uppercase tickers.
+    """
+    text = next(
+        (b.text for b in response.content if getattr(b, "type", None) == "text"),
+        "",
+    )
+    match = re.search(r'"candidates"\s*:\s*(\[.*?\])', text, re.DOTALL)
+    if match:
+        try:
+            candidates = json.loads(match.group(1))
+            if isinstance(candidates, list):
+                return [str(t).upper().strip() for t in candidates[:10] if t]
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return []
+
+# ---------------------------------------------------------------------------
+# Message helpers
 # ---------------------------------------------------------------------------
 
 def _build_initial_user_message(headlines_text: str, positions: list[dict]) -> dict:
@@ -426,12 +444,27 @@ def _build_initial_user_message(headlines_text: str, positions: list[dict]) -> d
 
 
 def _parse_json_response(text: str) -> dict:
-    """Strip optional markdown fences and parse JSON."""
+    """
+    Extract and parse a JSON object from Claude's response text.
+
+    Handles:
+    - Bare JSON (most common in production)
+    - Markdown fences (```json ... ```)
+    - Leading prose before the opening brace
+    """
     stripped = text.strip()
+
+    # Strip markdown fences
     if stripped.startswith("```"):
         lines = stripped.splitlines()
         inner = lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
         stripped = "\n".join(inner).strip()
+
+    # If the text still doesn't start with {, find the first { and parse from there
+    brace = stripped.find("{")
+    if brace > 0:
+        stripped = stripped[brace:]
+
     return json.loads(stripped)
 
 
@@ -443,7 +476,7 @@ def _parse_final_report(response) -> dict:
     return _parse_json_response(raw_text)
 
 # ---------------------------------------------------------------------------
-# Agentic loop
+# Two-phase agentic loop
 # ---------------------------------------------------------------------------
 
 def generate_report(
@@ -453,19 +486,21 @@ def generate_report(
     debug: bool = False,
 ) -> dict:
     """
-    Generate a morning trading report using an agentic Claude loop with tool use.
+    Generate a morning trading report using a two-phase agentic Claude loop.
 
-    Claude may call ``get_quote`` or ``get_technicals`` up to MAX_TURNS (3) times
-    total before being forced to produce the final JSON report.
+    Phase 1 — SCAN: Claude identifies up to 10 candidate tickers without
+    making any tool calls.
+
+    Phase 2 — RESEARCH: For each candidate Claude calls get_quote then
+    get_technicals (mandatory), then up to 2 more free-choice calls.
+    Hard caps: 4 calls/ticker, 40 calls total.
 
     Args:
-        headlines_text: Newline-separated headlines string (pre-formatted).
+        headlines_text: Newline-separated headlines string.
         positions: List of position dicts from the database.
         etrade_session: Optional OAuth1Session for E*TRADE API calls.
-            When None, tool calls return a graceful error and Claude proceeds
-            with the data it has from headlines and positions.
-        debug: When True, write the full Claude conversation (requests, tool
-            calls, and tool results) to ./logs/report_conversation_{date}.log.
+        debug: When True, write the full Claude conversation to
+            ./logs/report_conversation_{date}.log.
 
     Returns:
         Parsed report dict.
@@ -475,32 +510,64 @@ def generate_report(
     """
     client = anthropic.Anthropic()
     allowed_tickers = build_allow_list(headlines_text, positions)
-    seen_calls: set = set()
-    turns = 0
-
-    messages = [_build_initial_user_message(headlines_text, positions)]
+    total_calls = 0
 
     if debug:
         print(f"  [debug] conversation log → {_conversation_log_path()}")
 
-    while turns <= MAX_TURNS:
+    # -----------------------------------------------------------------------
+    # Phase 1 — SCAN
+    # -----------------------------------------------------------------------
+    messages: list[dict] = [_build_initial_user_message(headlines_text, positions)]
+
+    scan_response = client.messages.create(
+        model="claude-opus-4-5",
+        max_tokens=2048,
+        system=_SYSTEM_PROMPT,
+        tools=_ALL_TOOLS,
+        tool_choice={"type": "none"},
+        messages=list(messages),
+    )
+    messages.append({"role": "assistant", "content": scan_response.content})
+
+    if debug:
+        _write_conversation_log(_format_conversation(messages, "scan", finished=False))
+
+    raw_candidates = parse_candidates(scan_response)
+    candidates = [t for t in raw_candidates if t in allowed_tickers]
+    ticker_budgets: dict[str, TickerBudget] = {t: TickerBudget(ticker=t) for t in candidates}
+
+    # Instruct Claude to begin the research phase
+    messages.append({
+        "role": "user",
+        "content": (
+            f"Candidates confirmed: {candidates}. "
+            "Begin research phase. Call get_quote then get_technicals for each "
+            "candidate, then use your remaining 2 calls per ticker as you see fit. "
+            "When all research is complete, produce the final JSON report."
+        ),
+    })
+
+    # -----------------------------------------------------------------------
+    # Phase 2 — RESEARCH loop
+    # -----------------------------------------------------------------------
+    while True:
         response = client.messages.create(
             model="claude-opus-4-5",
             max_tokens=4096,
             system=_SYSTEM_PROMPT,
-            tools=[GET_QUOTE_TOOL, GET_TECHNICALS_TOOL],
+            tools=_ALL_TOOLS,
             messages=list(messages),
         )
-
         messages.append({"role": "assistant", "content": response.content})
 
         if debug:
-            _write_conversation_log(_format_conversation(
-                messages, turns, finished=(response.stop_reason == "end_turn")
-            ))
+            _write_conversation_log(
+                _format_conversation(messages, "research", finished=(response.stop_reason == "end_turn"))
+            )
 
         if response.stop_reason == "end_turn":
-            print(f"Report generated in {turns} tool call turns.")
+            _print_summary(len(candidates), total_calls)
             return _parse_final_report(response)
 
         if response.stop_reason == "tool_use":
@@ -509,29 +576,62 @@ def generate_report(
                 if block.type != "tool_use":
                     continue
 
-                if turns >= MAX_TURNS:
-                    # 4th+ tool call attempt — block it without consuming a turn
+                ticker = (block.input or {}).get("ticker", "").upper().strip()
+                tool_name = block.name
+
+                # Global cap check
+                if total_calls >= GLOBAL_MAX:
                     result = (
-                        "Tool call limit reached. Proceed to generate the report now "
-                        "with the data you have."
+                        "Global research budget exhausted (40/40 calls). "
+                        "Produce the final JSON report now."
+                    )
+                    _log_tool_call(
+                        tool_name, ticker, "research",
+                        allowed=False, result_summary=result, elapsed_ms=0,
+                    )
+                elif ticker not in allowed_tickers:
+                    result = (
+                        f"Ticker {ticker} is not on the approved list. "
+                        "Do not request it."
+                    )
+                    _log_tool_call(
+                        tool_name, ticker, "research",
+                        allowed=False, result_summary=result, elapsed_ms=0,
                     )
                 else:
-                    ticker = (block.input or {}).get("ticker", "").upper().strip()
-                    if ticker not in allowed_tickers:
-                        # Rejected before dispatch — does not consume a turn
-                        result = (
-                            f"Ticker {ticker} is not in the approved list for this session. "
-                            "Do not request it again."
-                        )
+                    # Per-ticker budget check
+                    if ticker not in ticker_budgets:
+                        ticker_budgets[ticker] = TickerBudget(ticker=ticker)
+                    budget = ticker_budgets[ticker]
+                    can, reason = budget.can_call(tool_name)
+
+                    if not can:
+                        result = reason
                         _log_tool_call(
-                            block.name, ticker, turns,
+                            tool_name, ticker, "research",
                             allowed=False, result_summary=result, elapsed_ms=0,
+                            budget_status=budget.budget_status,
                         )
                     else:
-                        result = dispatch_tool_call(
-                            block, allowed_tickers, seen_calls, etrade_session, turns
+                        t0 = time.monotonic()
+                        result = dispatch_tool_call(tool_name, ticker, etrade_session)
+                        elapsed_ms = int((time.monotonic() - t0) * 1000)
+                        budget.record_call(tool_name)
+                        total_calls += 1
+
+                        unusual = None
+                        if tool_name == "get_options_flow":
+                            try:
+                                unusual = json.loads(result).get("unusual_activity")
+                            except (json.JSONDecodeError, AttributeError):
+                                pass
+
+                        _log_tool_call(
+                            tool_name, ticker, "research",
+                            allowed=True, result_summary=result, elapsed_ms=elapsed_ms,
+                            budget_status=budget.budget_status,
+                            unusual_activity=unusual,
                         )
-                        turns += 1
 
                 tool_results.append({
                     "type": "tool_result",
@@ -541,24 +641,36 @@ def generate_report(
 
             messages.append({"role": "user", "content": tool_results})
 
-        if turns >= MAX_TURNS:
-            # Force one final non-tool completion so Claude must produce the report.
+        # Force final if global cap hit
+        if total_calls >= GLOBAL_MAX:
+            messages.append({
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "Research budget exhausted. Produce the final JSON report now.",
+                }],
+            })
             final = client.messages.create(
                 model="claude-opus-4-5",
                 max_tokens=4096,
                 system=_SYSTEM_PROMPT,
-                tools=[],  # no tools → forces end_turn
+                tools=[],
                 messages=list(messages),
             )
             messages.append({"role": "assistant", "content": final.content})
             if debug:
-                _write_conversation_log(_format_conversation(
-                    messages, turns, finished=True
-                ))
-            print(f"Report generated in {turns} tool call turns.")
+                _write_conversation_log(
+                    _format_conversation(messages, "research", finished=True)
+                )
+            _print_summary(len(candidates), total_calls)
             return _parse_final_report(final)
 
-    raise RuntimeError("Agentic loop exited without producing a report.")
+
+def _print_summary(n_candidates: int, total_calls: int) -> None:
+    print(
+        f"Research complete: {n_candidates} candidates scanned, "
+        f"{total_calls} total tool calls used, top 3 selected."
+    )
 
 # ---------------------------------------------------------------------------
 # Public wrapper (backward-compatible with main.py)

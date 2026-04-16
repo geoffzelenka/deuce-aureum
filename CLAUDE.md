@@ -73,25 +73,41 @@ Flask reads from this dict on each `/api/quotes` request.
 
 ## Report generation (agentic loop)
 
-`report/generator.py` uses an agentic tool-use loop. Claude may call two tools mid-analysis
-before producing the final JSON:
+`report/generator.py` uses a two-phase agentic tool-use loop. All three tool
+implementations live in `report/enricher.py`.
 
-- `get_quote` — fetches a live single-ticker quote from E*TRADE
-- `get_technicals` — computes SMA-20/50/200 and 30-day avg volume from Yahoo Finance
-  (stub implementation; RSI-14 returns `null` until a proper data source is integrated)
+**Tools available to Claude:**
+- `get_quote` — live single-ticker quote from E*TRADE
+- `get_technicals` — SMA-20/50/200 and 30-day avg volume from Yahoo Finance
+  (RSI-14 returns `null` until a proper data source is integrated)
+- `get_options_flow` — E*TRADE options chain summary: call/put volume, put/call
+  ratio, largest single trade, `unusual_activity` flag (True if ratio outside
+  0.4–1.8 or any trade premium > $500k)
+
+**Phase 1 — SCAN** (`tool_choice: none`): Claude reads all headlines and
+positions and nominates up to 10 candidate tickers, emitting a
+`{"candidates": [...]}` JSON block. Candidates are filtered against the
+session allow-list before Phase 2 begins.
+
+**Phase 2 — RESEARCH**: For each candidate, Claude must call `get_quote` then
+`get_technicals` (mandatory, in that order), then up to 2 free-choice calls
+from any of the three tools.
 
 Guardrails enforced in `generate_report()`:
-- **3-turn limit** — forces `end_turn` after 3 tool calls
-- **Ticker allow-list** — only tickers from positions or extracted from headlines are permitted
-- **Duplicate block** — same (tool, ticker) pair cannot be called twice per session
-- **5-second timeout** per E*TRADE call
+- **Per-ticker budget** — 4 calls max; `get_quote` must precede `get_technicals`
+- **Global cap** — 40 calls total; forces a `tools=[]` final completion when hit
+- **Ticker allow-list** — only tickers from positions or extracted from headlines
+- **5-second timeout** per E*TRADE call (errors returned as `{"error": "..."}`,
+  never raised)
 
-Every tool call attempt is logged to `./logs/tool_calls.log` (timestamp, ticker, tool name,
-turn number, allowed yes/no, elapsed ms, result summary).
+Every tool call attempt is logged to `./logs/tool_calls.log` (phase, ticker,
+tool name, allowed yes/no, elapsed ms, budget status, `unusual_activity` flag
+when applicable).
 
-`generate_morning_report(etrade_session=None, debug=False)` is the public entry point used by
-`main.py`. Pass an active `OAuth1Session` to enable live `get_quote` calls; omit it to run on
-headlines and positions alone. `debug=True` writes the full turn-by-turn Claude conversation to
+`generate_morning_report(etrade_session=None, debug=False)` is the public entry
+point used by `main.py`. Pass an active `OAuth1Session` to enable live E*TRADE
+calls; omit it to run on headlines and positions alone. `debug=True` writes the
+full turn-by-turn Claude conversation to
 `./logs/report_conversation_{date}.log` (updated after every API round-trip).
 
 ## Headlines file format
