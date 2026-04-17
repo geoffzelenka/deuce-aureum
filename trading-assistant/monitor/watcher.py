@@ -1,9 +1,12 @@
 """
 Real-time position monitor.
 
-Loads the top-3 tickers from today's morning report, then polls the
-E*TRADE Quote API every `interval_seconds`, tracking price and volume
-and firing entry/exit alerts via alerts.notifier.
+On startup, prefers confirmed top-3 tickers from today's mid-morning
+assessment (watchlist DB).  Falls back to the provisional top-3 from the
+pre-market report JSON if the mid-morning has not yet run.
+
+Polls the E*TRADE Quote API every `interval_seconds`, tracking price and
+volume and firing entry/exit alerts via alerts.notifier.
 """
 
 import json
@@ -59,8 +62,6 @@ class TickerState:
     rolling: deque = field(default_factory=deque)
 
     # Previous VOLUME_PERIODS volume readings for spike detection.
-    # Populated AFTER the signal check each tick so the current reading
-    # is always compared against prior history.
     volume_history: deque = field(default_factory=lambda: deque(maxlen=VOLUME_PERIODS))
 
 
@@ -130,7 +131,6 @@ def _update_state(state: TickerState, quote: dict) -> None:
     now = time.monotonic()
     cutoff = now - ROLLING_WINDOW_SECONDS
 
-    # Price — E*TRADE may use lastTrade or last depending on detailFlag
     raw_price = all_data.get("lastTrade") or all_data.get("last") or all_data.get("lastPrice")
     if raw_price is not None:
         state.last_price = float(raw_price)
@@ -173,16 +173,13 @@ def _check_signals(state: TickerState) -> None:
     price = state.last_price
     volume = state.volume
 
-    # --- Volume spike: current volume vs average of previous VOLUME_PERIODS readings ---
     if len(state.volume_history) >= 1:
         avg_vol = sum(state.volume_history) / len(state.volume_history)
         vol_spike = avg_vol > 0 and volume > VOLUME_SPIKE_FACTOR * avg_vol
     else:
-        vol_spike = False  # not enough history yet
+        vol_spike = False
 
-    # --- Signals require a valid entry range (entry_low == 0 means none was parsed) ---
     if state.entry_low > 0:
-        # --- Entry signal ---
         if price <= state.entry_low and vol_spike:
             hi, lo = _rolling_high_low(state)
             range_str = f" | 5m: ${lo:.2f}-${hi:.2f}" if (hi and lo) else ""
@@ -193,7 +190,6 @@ def _check_signals(state: TickerState) -> None:
             )
             send_alert(state.ticker, "ENTRY", price, reason)
 
-        # --- Exit signals (referenced from entry_low as the entry price anchor) ---
         entry_ref = state.entry_low
 
         profit_price = entry_ref * (1 + PROFIT_TARGET_PCT / 100)
@@ -212,7 +208,6 @@ def _check_signals(state: TickerState) -> None:
             )
             send_alert(state.ticker, "STOP_LOSS", price, reason)
 
-    # Append current volume AFTER signal check — becomes "previous" on next tick
     state.volume_history.append(volume)
 
 
@@ -253,6 +248,66 @@ def _print_status(states: dict[str, "TickerState"]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Session summary helpers
+# ---------------------------------------------------------------------------
+
+def get_session_summary(session_date: date | None = None) -> dict:
+    """
+    Return a dict describing which ticker set the watcher will use.
+
+    Keys:
+        mode    — "confirmed", "provisional", or "unavailable"
+        tickers — list of ticker strings
+        reason  — human-readable explanation
+    """
+    if session_date is None:
+        session_date = date.today()
+
+    try:
+        from store.db import get_watchlist, watchlist_exists
+    except ImportError:
+        return {"mode": "unavailable", "tickers": [], "reason": "DB module unavailable."}
+
+    if watchlist_exists(session_date):
+        watchlist = get_watchlist(session_date)
+        confirmed = sorted(
+            [w for w in watchlist if w.get("confirmed") and w.get("confirmed_rank")],
+            key=lambda w: w["confirmed_rank"],
+        )
+        if confirmed:
+            tickers = [c["ticker"] for c in confirmed[:3]]
+            return {
+                "mode": "confirmed",
+                "tickers": tickers,
+                "reason": "Mid-morning assessment complete — monitoring confirmed top 3.",
+            }
+
+        provisional = sorted(
+            [w for w in watchlist if w.get("rank") is not None],
+            key=lambda w: w["rank"],
+        )[:3]
+        if provisional:
+            tickers = [p["ticker"] for p in provisional]
+            return {
+                "mode": "provisional",
+                "tickers": tickers,
+                "reason": "Monitoring provisional top 3 (mid-morning not yet run).",
+            }
+
+    # Fall back to report JSON
+    try:
+        tickers_ranges = _load_report_tickers()
+        tickers = list(tickers_ranges.keys())
+        return {
+            "mode": "provisional",
+            "tickers": tickers,
+            "reason": "Monitoring provisional top 3 from report JSON (mid-morning not yet run).",
+        }
+    except RuntimeError:
+        return {"mode": "unavailable", "tickers": [], "reason": "No report found for today."}
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -264,9 +319,6 @@ def watch(
     """
     Poll E*TRADE for quotes on the given symbols every `interval_seconds`.
     Runs until interrupted with Ctrl-C.
-
-    entry_ranges: {ticker: (entry_low, entry_high)} from the morning report.
-                  When None, entry/exit signal thresholds are not enforced.
     """
     states: dict[str, TickerState] = {}
     for sym in symbols:
@@ -310,10 +362,37 @@ def watch(
 
 
 def monitor_from_report(interval_seconds: int = 60) -> None:
-    """Load today's top-play tickers from the morning report and start the watch loop."""
-    tickers_ranges = _load_report_tickers()
-    if not tickers_ranges:
-        raise RuntimeError("No tickers found in today's report.")
-    symbols = list(tickers_ranges.keys())
-    print(f"Loaded {len(symbols)} tickers from today's report: {', '.join(symbols)}")
-    watch(symbols, entry_ranges=tickers_ranges, interval_seconds=interval_seconds)
+    """
+    Load today's top-play tickers and start the watch loop.
+
+    Preference order:
+    1. Confirmed top 3 from the watchlist DB (mid-morning assessment ran)
+    2. Provisional top 3 from the watchlist DB (pre-market ran, no mid-morning yet)
+    3. Top 3 from the report JSON file (fallback)
+    """
+    today = date.today()
+
+    # Try to load entry ranges from report JSON (used for signal thresholds)
+    try:
+        report_tickers_ranges = _load_report_tickers()
+    except RuntimeError:
+        report_tickers_ranges = {}
+
+    summary = get_session_summary(today)
+
+    if summary["mode"] == "unavailable":
+        raise RuntimeError(
+            summary["reason"] + " Run 'report' or 'kickoff' first."
+        )
+
+    tickers = summary["tickers"]
+    if not tickers:
+        raise RuntimeError("No tickers found for today's watch session.")
+
+    print(summary["reason"])
+
+    # Build entry ranges: prefer report JSON values, zero out anything missing
+    entry_ranges = {t: report_tickers_ranges.get(t, (0.0, 0.0)) for t in tickers}
+    print(f"Loaded {len(tickers)} tickers: {', '.join(tickers)}")
+
+    watch(tickers, entry_ranges=entry_ranges, interval_seconds=interval_seconds)

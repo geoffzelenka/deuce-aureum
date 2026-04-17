@@ -6,8 +6,12 @@ Two-phase agentic loop:
                    10 candidate tickers without calling any tools.
   Phase 2 — RESEARCH: For each candidate Claude calls get_quote then
                    get_technicals (mandatory, in that order), then up to 2
-                   more free-choice calls from the three available tools.
+                   more free-choice calls from the available tools.
                    Hard caps: 4 calls per ticker, 40 calls total.
+
+session_type controls which tools are available:
+  "premarket"  — get_quote + get_technicals only (no options flow)
+  "midmorning" — all three tools including get_options_flow
 """
 
 import json
@@ -40,13 +44,14 @@ if not _tool_logger.handlers:
     _tool_logger.setLevel(logging.INFO)
 
 
-def _conversation_log_path() -> str:
-    return f"./logs/report_conversation_{date.today().strftime('%Y-%m-%d')}.log"
+def _conversation_log_path(prefix: str = "report") -> str:
+    return f"./logs/{prefix}_conversation_{date.today().strftime('%Y-%m-%d')}.log"
 
 
-def _write_conversation_log(lines: list[str]) -> None:
-    """Overwrite today's conversation log with the current content."""
-    with open(_conversation_log_path(), "w", encoding="utf-8") as fh:
+def _write_conversation_log(lines: list[str], path: str | None = None) -> None:
+    """Overwrite the conversation log with the current content."""
+    target = path or _conversation_log_path()
+    with open(target, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
 
 
@@ -128,7 +133,32 @@ def _format_conversation(messages: list, phase: str, finished: bool) -> list[str
 # System prompt
 # ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT = (
+_SESSION_CONTEXT_PREMARKET = (
+    "SESSION CONTEXT: Pre-market analysis (~45 minutes before open).\n"
+    "Options flow data is NOT available at this time — do not attempt to "
+    "call get_options_flow. Your top 3 picks are provisional and will be "
+    "confirmed at 10:30 AM once options flow is available.\n"
+    "When identifying candidates in Phase 1, note the specific catalyst "
+    "and assign a pre_market_score of high/medium/low based on how "
+    "unambiguous and unpriced the catalyst appears to be.\n\n"
+)
+
+_SESSION_CONTEXT_MIDMORNING = (
+    "SESSION CONTEXT: Mid-morning assessment (~10:30 AM, market open ~60 min).\n"
+    "You have access to get_options_flow. Options volume is now meaningful — "
+    "use it for any candidate with a binary catalyst (earnings, FDA, merger, "
+    "macro event). The watchlist below was built pre-market. Your job is to "
+    "validate, re-rank, and confirm the top 3 using live data.\n"
+    "For each candidate, check: has the price moved significantly since "
+    "pre-market? Does options flow confirm the directional thesis or "
+    "contradict it? Upgrade conviction if options flow is unusual and "
+    "aligned. Downgrade or drop if the catalyst is already fully priced in "
+    "or options flow is contradictory.\n"
+    "Skip Phase 1 — candidates are already identified. Proceed directly to "
+    "Phase 2 research on the watchlist tickers provided.\n\n"
+)
+
+_BASE_SYSTEM_PROMPT = (
     "You are a seasoned stock market analyst with decades of trading experience. "
     "Your specialty is providing actionable, concise guidance based on current news "
     "and market positions. You cut through noise to identify high-probability setups "
@@ -142,10 +172,13 @@ _SYSTEM_PROMPT = (
     "PHASE 1 — SCAN (current phase when you first receive the prompt)\n"
     "Read all headlines and positions. Identify up to 10 candidate tickers "
     "that have a clear news catalyst worthy of investigation. Output your "
-    'candidates list in your response as a JSON block with key "candidates". '
+    "candidates list in your response as a JSON block:\n"
+    '{"candidates": [{"ticker": "AAPL", "catalyst": "one-sentence reason", '
+    '"pre_market_score": "high|medium|low"}, ...]}\n'
     "Do not call any tools in this phase. Be selective — only include tickers "
     "where a catalyst is evident in the headlines or where a held position "
-    "warrants live data to assess.\n\n"
+    "warrants live data to assess. Assign pre_market_score based on how "
+    "unambiguous and unpriced the catalyst appears.\n\n"
 
     "PHASE 2 — RESEARCH (begins after candidates are confirmed)\n"
     "For each candidate ticker you must follow this call order:\n"
@@ -153,11 +186,11 @@ _SYSTEM_PROMPT = (
     "already priced in (stock already up/down significantly).\n"
     "  2. get_technicals — always second. Confirms trend direction and "
     "whether the setup has technical support.\n"
-    "  3 & 4. Your choice from get_quote, get_technicals, or get_options_flow. "
-    "Use get_options_flow for binary catalyst events (earnings, FDA, "
-    "merger votes, Fed decisions) to gauge smart money positioning. "
-    "Use a second get_quote if significant time has passed. Use a second "
-    "get_technicals only if the first result was ambiguous.\n\n"
+    "  3 & 4. Your choice from available tools. "
+    "Use get_options_flow (when available) for binary catalyst events "
+    "(earnings, FDA, merger votes, Fed decisions) to gauge smart money "
+    "positioning. Use a second get_quote if significant time has passed. "
+    "Use a second get_technicals only if the first result was ambiguous.\n\n"
 
     "Budget rules:\n"
     "- Maximum 4 tool calls per ticker.\n"
@@ -181,7 +214,17 @@ _SYSTEM_PROMPT = (
     "how good the technicals look."
 )
 
-_SCHEMA_DESCRIPTION = """{
+
+def _build_system_prompt(session_type: str) -> str:
+    """Prepend the appropriate SESSION CONTEXT block to the base system prompt."""
+    if session_type == "premarket":
+        return _SESSION_CONTEXT_PREMARKET + _BASE_SYSTEM_PROMPT
+    if session_type == "midmorning":
+        return _SESSION_CONTEXT_MIDMORNING + _BASE_SYSTEM_PROMPT
+    return _BASE_SYSTEM_PROMPT
+
+
+_PREMARKET_SCHEMA_DESCRIPTION = """{
   "top_plays": [            // exactly 3 entries
     {
       "ticker": "AAPL",
@@ -208,6 +251,9 @@ _SCHEMA_DESCRIPTION = """{
     }
   ]
 }"""
+
+# Keep the old name as an alias for backward compatibility
+_SCHEMA_DESCRIPTION = _PREMARKET_SCHEMA_DESCRIPTION
 
 # ---------------------------------------------------------------------------
 # Tool definitions
@@ -273,6 +319,7 @@ GET_OPTIONS_FLOW_TOOL = {
 }
 
 _ALL_TOOLS = [GET_QUOTE_TOOL, GET_TECHNICALS_TOOL, GET_OPTIONS_FLOW_TOOL]
+_PREMARKET_TOOLS = [GET_QUOTE_TOOL, GET_TECHNICALS_TOOL]
 
 # Budget constants
 GLOBAL_MAX = 40
@@ -384,12 +431,16 @@ def dispatch_tool_call(tool_name: str, ticker: str, etrade_session) -> str:
 # Candidate parsing
 # ---------------------------------------------------------------------------
 
-def parse_candidates(response) -> list[str]:
+def parse_candidates_full(response) -> list[dict]:
     """
-    Extract the candidates list from a Phase 1 scan response.
+    Extract full candidate metadata from a Phase 1 scan response.
 
-    Looks for a JSON snippet containing ``"candidates": [...]`` anywhere in
-    the first text block of the response.  Returns up to 10 uppercase tickers.
+    Handles both the new dict format:
+        {"candidates": [{"ticker": "AAPL", "catalyst": "...", "pre_market_score": "high"}, ...]}
+    and the legacy plain-string format:
+        {"candidates": ["AAPL", "MSFT"]}
+
+    Returns up to 10 dicts with keys: ticker, rank, catalyst, pre_market_score.
     """
     text = next(
         (b.text for b in response.content if getattr(b, "type", None) == "text"),
@@ -398,12 +449,40 @@ def parse_candidates(response) -> list[str]:
     match = re.search(r'"candidates"\s*:\s*(\[.*?\])', text, re.DOTALL)
     if match:
         try:
-            candidates = json.loads(match.group(1))
-            if isinstance(candidates, list):
-                return [str(t).upper().strip() for t in candidates[:10] if t]
+            items = json.loads(match.group(1))
+            if isinstance(items, list):
+                result = []
+                for i, item in enumerate(items[:10]):
+                    if isinstance(item, str) and item.strip():
+                        result.append({
+                            "ticker": item.upper().strip(),
+                            "rank": i + 1,
+                            "catalyst": None,
+                            "pre_market_score": None,
+                        })
+                    elif isinstance(item, dict):
+                        ticker = str(item.get("ticker", "")).upper().strip()
+                        if ticker:
+                            result.append({
+                                "ticker": ticker,
+                                "rank": i + 1,
+                                "catalyst": item.get("catalyst"),
+                                "pre_market_score": item.get("pre_market_score"),
+                            })
+                return result
         except (json.JSONDecodeError, ValueError):
             pass
     return []
+
+
+def parse_candidates(response) -> list[str]:
+    """
+    Extract the candidates list from a Phase 1 scan response.
+
+    Handles both the new dict format (with catalyst/pre_market_score) and
+    the legacy plain-string format.  Returns up to 10 uppercase ticker strings.
+    """
+    return [c["ticker"] for c in parse_candidates_full(response)]
 
 # ---------------------------------------------------------------------------
 # Message helpers
@@ -433,7 +512,7 @@ def _build_initial_user_message(headlines_text: str, positions: list[dict]) -> d
         f"TODAY'S HEADLINES:\n{headlines_text}\n\n"
         f"CURRENT POSITIONS:\n{positions_text}\n\n"
         f"Analyse the above and return a JSON object matching this schema exactly:\n"
-        f"{_SCHEMA_DESCRIPTION}\n\n"
+        f"{_PREMARKET_SCHEMA_DESCRIPTION}\n\n"
         "Requirements:\n"
         "- top_plays: exactly 3 entries (best day-trade or overnight opportunities)\n"
         "- position_outlooks: one entry for every position listed above\n"
@@ -476,94 +555,43 @@ def _parse_final_report(response) -> dict:
     return _parse_json_response(raw_text)
 
 # ---------------------------------------------------------------------------
-# Two-phase agentic loop
+# Shared Phase 2 research loop
 # ---------------------------------------------------------------------------
 
-def generate_report(
-    headlines_text: str,
-    positions: list[dict],
-    etrade_session=None,
+def _run_research_phase(
+    client,
+    messages: list[dict],
+    system_prompt: str,
+    tools: list,
+    allowed_tickers: set[str],
+    candidates: list[str],
+    etrade_session,
     debug: bool = False,
+    conversation_log_path: str | None = None,
 ) -> dict:
     """
-    Generate a morning trading report using a two-phase agentic Claude loop.
+    Execute the Phase 2 research loop and return the parsed report dict.
 
-    Phase 1 — SCAN: Claude identifies up to 10 candidate tickers without
-    making any tool calls.
-
-    Phase 2 — RESEARCH: For each candidate Claude calls get_quote then
-    get_technicals (mandatory), then up to 2 more free-choice calls.
-    Hard caps: 4 calls/ticker, 40 calls total.
-
-    Args:
-        headlines_text: Newline-separated headlines string.
-        positions: List of position dicts from the database.
-        etrade_session: Optional OAuth1Session for E*TRADE API calls.
-        debug: When True, write the full Claude conversation to
-            ./logs/report_conversation_{date}.log.
-
-    Returns:
-        Parsed report dict.
-
-    Raises:
-        RuntimeError: If the loop exits without producing a report.
+    Modifies ``messages`` in-place, appending assistant and user turns.
+    Returns when Claude emits end_turn or the global call cap is hit.
     """
-    client = anthropic.Anthropic()
-    allowed_tickers = build_allow_list(headlines_text, positions)
+    ticker_budgets: dict[str, TickerBudget] = {t: TickerBudget(ticker=t) for t in candidates}
     total_calls = 0
 
-    if debug:
-        print(f"  [debug] conversation log → {_conversation_log_path()}")
-
-    # -----------------------------------------------------------------------
-    # Phase 1 — SCAN
-    # -----------------------------------------------------------------------
-    messages: list[dict] = [_build_initial_user_message(headlines_text, positions)]
-
-    scan_response = client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=2048,
-        system=_SYSTEM_PROMPT,
-        tools=_ALL_TOOLS,
-        tool_choice={"type": "none"},
-        messages=list(messages),
-    )
-    messages.append({"role": "assistant", "content": scan_response.content})
-
-    if debug:
-        _write_conversation_log(_format_conversation(messages, "scan", finished=False))
-
-    raw_candidates = parse_candidates(scan_response)
-    candidates = [t for t in raw_candidates if t in allowed_tickers]
-    ticker_budgets: dict[str, TickerBudget] = {t: TickerBudget(ticker=t) for t in candidates}
-
-    # Instruct Claude to begin the research phase
-    messages.append({
-        "role": "user",
-        "content": (
-            f"Candidates confirmed: {candidates}. "
-            "Begin research phase. Call get_quote then get_technicals for each "
-            "candidate, then use your remaining 2 calls per ticker as you see fit. "
-            "When all research is complete, produce the final JSON report."
-        ),
-    })
-
-    # -----------------------------------------------------------------------
-    # Phase 2 — RESEARCH loop
-    # -----------------------------------------------------------------------
     while True:
         response = client.messages.create(
             model="claude-opus-4-5",
             max_tokens=4096,
-            system=_SYSTEM_PROMPT,
-            tools=_ALL_TOOLS,
+            system=system_prompt,
+            tools=tools,
             messages=list(messages),
         )
         messages.append({"role": "assistant", "content": response.content})
 
-        if debug:
+        if debug and conversation_log_path:
             _write_conversation_log(
-                _format_conversation(messages, "research", finished=(response.stop_reason == "end_turn"))
+                _format_conversation(messages, "research", finished=(response.stop_reason == "end_turn")),
+                path=conversation_log_path,
             )
 
         if response.stop_reason == "end_turn":
@@ -653,17 +681,136 @@ def generate_report(
             final = client.messages.create(
                 model="claude-opus-4-5",
                 max_tokens=4096,
-                system=_SYSTEM_PROMPT,
+                system=system_prompt,
                 tools=[],
                 messages=list(messages),
             )
             messages.append({"role": "assistant", "content": final.content})
-            if debug:
+            if debug and conversation_log_path:
                 _write_conversation_log(
-                    _format_conversation(messages, "research", finished=True)
+                    _format_conversation(messages, "research", finished=True),
+                    path=conversation_log_path,
                 )
             _print_summary(len(candidates), total_calls)
             return _parse_final_report(final)
+
+# ---------------------------------------------------------------------------
+# Two-phase agentic loop
+# ---------------------------------------------------------------------------
+
+def generate_report(
+    headlines_text: str,
+    positions: list[dict],
+    etrade_session=None,
+    debug: bool = False,
+    session_type: str = "premarket",
+) -> dict:
+    """
+    Generate a morning trading report using a two-phase agentic Claude loop.
+
+    Phase 1 — SCAN: Claude identifies up to 10 candidate tickers without
+    making any tool calls. Candidates are saved to the watchlist table.
+
+    Phase 2 — RESEARCH: For each candidate Claude calls get_quote then
+    get_technicals (mandatory), then up to 2 more free-choice calls.
+    Hard caps: 4 calls/ticker, 40 calls total.
+
+    Args:
+        headlines_text: Newline-separated headlines string.
+        positions: List of position dicts from the database.
+        etrade_session: Optional OAuth1Session for E*TRADE API calls.
+        debug: When True, write the full Claude conversation to
+            ./logs/report_conversation_{date}.log.
+        session_type: "premarket" (no options flow) or "midmorning" (all tools).
+
+    Returns:
+        Parsed report dict.
+
+    Raises:
+        RuntimeError: If the loop exits without producing a report.
+    """
+    client = anthropic.Anthropic()
+    allowed_tickers = build_allow_list(headlines_text, positions)
+    system_prompt = _build_system_prompt(session_type)
+    tools = _PREMARKET_TOOLS if session_type == "premarket" else _ALL_TOOLS
+
+    if debug:
+        log_path = _conversation_log_path("report")
+        print(f"  [debug] conversation log → {log_path}")
+    else:
+        log_path = None
+
+    # -----------------------------------------------------------------------
+    # Phase 1 — SCAN
+    # -----------------------------------------------------------------------
+    messages: list[dict] = [_build_initial_user_message(headlines_text, positions)]
+
+    scan_response = client.messages.create(
+        model="claude-opus-4-5",
+        max_tokens=2048,
+        system=system_prompt,
+        tools=tools,
+        tool_choice={"type": "none"},
+        messages=list(messages),
+    )
+    messages.append({"role": "assistant", "content": scan_response.content})
+
+    if debug:
+        _write_conversation_log(
+            _format_conversation(messages, "scan", finished=False),
+            path=log_path,
+        )
+
+    # Parse candidates (full metadata)
+    candidates_full = parse_candidates_full(scan_response)
+    filtered_full = [c for c in candidates_full if c["ticker"] in allowed_tickers]
+    candidates = [c["ticker"] for c in filtered_full]
+    ticker_budgets: dict[str, TickerBudget] = {t: TickerBudget(ticker=t) for t in candidates}
+
+    # Save candidates to watchlist immediately after Phase 1
+    if session_type == "premarket" and filtered_full:
+        try:
+            db.save_watchlist(filtered_full, date.today())
+        except Exception as exc:
+            print(f"  [warn] watchlist save failed: {exc}")
+
+    # Instruct Claude to begin the research phase
+    messages.append({
+        "role": "user",
+        "content": (
+            f"Candidates confirmed: {candidates}. "
+            "Begin research phase. Call get_quote then get_technicals for each "
+            "candidate, then use your remaining 2 calls per ticker as you see fit. "
+            "When all research is complete, produce the final JSON report."
+        ),
+    })
+
+    # -----------------------------------------------------------------------
+    # Phase 2 — RESEARCH loop
+    # -----------------------------------------------------------------------
+    report = _run_research_phase(
+        client=client,
+        messages=messages,
+        system_prompt=system_prompt,
+        tools=tools,
+        allowed_tickers=allowed_tickers,
+        candidates=candidates,
+        etrade_session=etrade_session,
+        debug=debug,
+        conversation_log_path=log_path,
+    )
+
+    # After Phase 2 (premarket): update watchlist ranks for the provisional top 3
+    if session_type == "premarket":
+        try:
+            for i, play in enumerate(report.get("top_plays", [])[:3]):
+                ticker = play.get("ticker", "").upper().strip()
+                if ticker:
+                    db.update_watchlist_rank(ticker, date.today(), i + 1)
+        except Exception as exc:
+            print(f"  [warn] watchlist rank update failed: {exc}")
+
+    return report
 
 
 def _print_summary(n_candidates: int, total_calls: int) -> None:
@@ -676,7 +823,11 @@ def _print_summary(n_candidates: int, total_calls: int) -> None:
 # Public wrapper (backward-compatible with main.py)
 # ---------------------------------------------------------------------------
 
-def generate_morning_report(etrade_session=None, debug: bool = False) -> dict:
+def generate_morning_report(
+    etrade_session=None,
+    debug: bool = False,
+    session_type: str = "premarket",
+) -> dict:
     """
     Fetch data from the database and run the agentic report loop.
 
@@ -684,6 +835,7 @@ def generate_morning_report(etrade_session=None, debug: bool = False) -> dict:
     report from headlines and positions without live quote data.
     ``debug`` writes the full Claude conversation to
     ./logs/report_conversation_{date}.log.
+    ``session_type`` is "premarket" (default) or "midmorning".
     """
     headlines = db.get_todays_headlines()
     positions = db.get_positions()
@@ -692,4 +844,4 @@ def generate_morning_report(etrade_session=None, debug: bool = False) -> dict:
         if headlines
         else "(no headlines stored for today)"
     )
-    return generate_report(headlines_text, positions, etrade_session, debug=debug)
+    return generate_report(headlines_text, positions, etrade_session, debug=debug, session_type=session_type)

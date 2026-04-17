@@ -33,12 +33,15 @@ python main.py kickoff --headlines headlines/2026-04-10.txt --positions position
 python main.py kickoff --skip-auth --headlines headlines/2026-04-10.txt --positions positions.txt
 python main.py kickoff --no-monitor --headlines headlines/2026-04-10.txt  # Flask only, no watcher
 python main.py kickoff --debug --headlines headlines/2026-04-10.txt --positions positions.txt
+python main.py midmorning                  # 10:30 AM assessment (requires kickoff first)
+python main.py midmorning --debug          # log full Claude conversation to logs/midmorning_conversation_{date}.log
 python main.py report
-python main.py report --debug      # log full Claude conversation to logs/report_conversation_{date}.log
-python main.py monitor             # watcher thread + Flask dashboard
+python main.py report --debug              # log full Claude conversation to logs/report_conversation_{date}.log
+python main.py monitor                     # watcher thread + Flask dashboard
 python main.py monitor --interval 30
+python main.py monitor --session-summary   # print confirmed/provisional status, then exit
 python main.py watch AAPL MSFT
-python main.py web                 # Flask only (no watcher)
+python main.py web                         # Flask only (no watcher)
 ```
 
 The database defaults to `./data/trading.db`. Override with `DB_PATH` in `.env`.
@@ -84,14 +87,26 @@ implementations live in `report/enricher.py`.
   ratio, largest single trade, `unusual_activity` flag (True if ratio outside
   0.4–1.8 or any trade premium > $500k)
 
+**`session_type` controls which tools are offered:**
+- `"premarket"` (default) — `get_quote` + `get_technicals` only; `get_options_flow`
+  is removed from the tools list entirely so Claude cannot call it
+- `"midmorning"` — all three tools available
+
 **Phase 1 — SCAN** (`tool_choice: none`): Claude reads all headlines and
-positions and nominates up to 10 candidate tickers, emitting a
-`{"candidates": [...]}` JSON block. Candidates are filtered against the
-session allow-list before Phase 2 begins.
+positions and nominates up to 10 candidate tickers, emitting a JSON block:
+```json
+{"candidates": [{"ticker": "AAPL", "catalyst": "one-sentence reason", "pre_market_score": "high|medium|low"}]}
+```
+Candidates are filtered against the session allow-list, then saved to the
+`watchlist` table via `save_watchlist()` before Phase 2 begins.
 
 **Phase 2 — RESEARCH**: For each candidate, Claude must call `get_quote` then
-`get_technicals` (mandatory, in that order), then up to 2 free-choice calls
-from any of the three tools.
+`get_technicals` (mandatory, in that order), then up to 2 free-choice calls.
+After Phase 2, the top-3 tickers' ranks are updated in the watchlist via
+`update_watchlist_rank()`.
+
+The shared `_run_research_phase()` helper in `generator.py` handles the loop
+and is reused by `report/midmorning.py`.
 
 Guardrails enforced in `generate_report()`:
 - **Per-ticker budget** — 4 calls max; `get_quote` must precede `get_technicals`
@@ -104,11 +119,45 @@ Every tool call attempt is logged to `./logs/tool_calls.log` (phase, ticker,
 tool name, allowed yes/no, elapsed ms, budget status, `unusual_activity` flag
 when applicable).
 
-`generate_morning_report(etrade_session=None, debug=False)` is the public entry
-point used by `main.py`. Pass an active `OAuth1Session` to enable live E*TRADE
-calls; omit it to run on headlines and positions alone. `debug=True` writes the
-full turn-by-turn Claude conversation to
+`generate_morning_report(etrade_session=None, debug=False, session_type="premarket")`
+is the public entry point used by `main.py`. Pass an active `OAuth1Session` to
+enable live E*TRADE calls; omit it to run on headlines and positions alone.
+`debug=True` writes the full turn-by-turn Claude conversation to
 `./logs/report_conversation_{date}.log` (updated after every API round-trip).
+
+## Mid-morning assessment (report/midmorning.py)
+
+`run_midmorning_assessment(etrade_session, debug=False)` is called by
+`python main.py midmorning`. It:
+
+1. Checks `watchlist_exists(today)` — exits with an error if kickoff hasn't run
+2. Loads the watchlist, today's headlines, and positions from the DB
+3. Builds a single user message with all context + research instructions
+   (no Phase 1 scan — candidates come from the persisted watchlist)
+4. Runs `_run_research_phase()` with all three tools and the same budget rules
+5. Calls `update_watchlist_confirmation()` for each confirmed top-3 play,
+   setting `confirmed=1`, `confirmed_rank`, and `options_unusual`
+
+The mid-morning JSON schema adds `options_confirmation` and `conviction_change`
+fields to each top play, and a `watchlist_dropped` array. Reports are saved to
+`./reports/YYYY-MM-DD-midmorning.{json,html}`.
+
+`_compute_conviction_change(pre_market_rank, confirmed_rank)` is a pure helper
+that returns `"upgraded"`, `"unchanged"`, or `"downgraded"`.
+
+## Watchlist DB (store/db.py)
+
+The `watchlist` table persists the pre-market scan candidates and mid-morning
+confirmation results for each trading day.
+
+Key functions:
+- `save_watchlist(candidates, session_date)` — upserts after Phase 1; each dict
+  needs `ticker`, optionally `rank`, `catalyst`, `pre_market_score`
+- `get_watchlist(session_date)` — returns rows ordered by rank
+- `watchlist_exists(session_date)` — used by midmorning to gate on kickoff having run
+- `update_watchlist_confirmation(ticker, session_date, confirmed_rank, options_unusual)`
+- `update_watchlist_rank(ticker, session_date, rank)` — called after Phase 2 to
+  finalize the provisional top-3 ranks
 
 ## Headlines file format
 
@@ -119,6 +168,19 @@ full turn-by-turn Claude conversation to
 
 This means standard newsletter-style formats (bullet lists with bold section headers) parse
 cleanly without feeding formatting noise to Claude.
+
+## Watcher — confirmed vs provisional top 3
+
+On startup, `monitor_from_report()` calls `get_session_summary()` which checks:
+1. **Confirmed top 3** from the watchlist DB (`confirmed=1`) — used if mid-morning ran
+2. **Provisional top 3** from the watchlist DB (`rank` 1–3) — used if only kickoff ran
+3. **Report JSON fallback** (`./reports/YYYY-MM-DD.json`) — if no watchlist exists
+
+The startup log prints `"Monitoring confirmed top 3"` or
+`"Monitoring provisional top 3 (mid-morning not yet run)."`.
+
+`python main.py monitor --session-summary` prints the current mode and tickers
+without starting the monitor loop.
 
 ## Watcher — tickers without a valid entry range
 

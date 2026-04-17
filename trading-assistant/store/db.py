@@ -40,6 +40,23 @@ def init_db(db_path: str = DB_PATH) -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS watchlist (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_date     DATE    NOT NULL,
+                ticker           TEXT    NOT NULL,
+                rank             INTEGER,
+                catalyst         TEXT,
+                pre_market_score TEXT,
+                confirmed        BOOLEAN DEFAULT 0,
+                confirmed_rank   INTEGER,
+                options_unusual  BOOLEAN,
+                created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(session_date, ticker)
+            )
+            """
+        )
 
 
 def insert_headlines(lines: list[str], source_date: date, db_path: str = DB_PATH) -> int:
@@ -109,6 +126,108 @@ def get_positions(db_path: str = DB_PATH) -> list[dict]:
             "SELECT ticker, name, shares, avg_cost, notes FROM positions ORDER BY ticker"
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Watchlist
+# ---------------------------------------------------------------------------
+
+def save_watchlist(candidates: list[dict], session_date: date, db_path: str = DB_PATH) -> None:
+    """
+    Persist pre-market scan candidates to the watchlist table.
+
+    Each dict must have 'ticker'; optional fields: 'rank', 'catalyst',
+    'pre_market_score'.  Uses INSERT OR REPLACE so re-running kickoff
+    on the same day overwrites stale data.
+    """
+    init_db(db_path)
+    date_str = session_date.isoformat()
+    with _connect(db_path) as conn:
+        for i, c in enumerate(candidates):
+            conn.execute(
+                """
+                INSERT INTO watchlist (session_date, ticker, rank, catalyst, pre_market_score)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(session_date, ticker) DO UPDATE SET
+                    rank             = excluded.rank,
+                    catalyst         = excluded.catalyst,
+                    pre_market_score = excluded.pre_market_score
+                """,
+                (
+                    date_str,
+                    c["ticker"],
+                    c.get("rank", i + 1),
+                    c.get("catalyst"),
+                    c.get("pre_market_score"),
+                ),
+            )
+
+
+def get_watchlist(session_date: date, db_path: str = DB_PATH) -> list[dict]:
+    """Return all watchlist entries for a given date, ordered by rank."""
+    init_db(db_path)
+    date_str = session_date.isoformat()
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT id, session_date, ticker, rank, catalyst, pre_market_score,
+                   confirmed, confirmed_rank, options_unusual, created_at
+            FROM watchlist
+            WHERE session_date = ?
+            ORDER BY CASE WHEN rank IS NULL THEN 1 ELSE 0 END, rank, id
+            """,
+            (date_str,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_watchlist_confirmation(
+    ticker: str,
+    session_date: date,
+    confirmed_rank: int,
+    options_unusual: bool,
+    db_path: str = DB_PATH,
+) -> None:
+    """Mark a watchlist entry as confirmed after mid-morning assessment."""
+    init_db(db_path)
+    date_str = session_date.isoformat()
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE watchlist
+            SET confirmed = 1, confirmed_rank = ?, options_unusual = ?
+            WHERE session_date = ? AND ticker = ?
+            """,
+            (confirmed_rank, options_unusual, date_str, ticker),
+        )
+
+
+def watchlist_exists(session_date: date, db_path: str = DB_PATH) -> bool:
+    """Return True if any watchlist entries exist for the given date."""
+    init_db(db_path)
+    date_str = session_date.isoformat()
+    with _connect(db_path) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM watchlist WHERE session_date = ?",
+            (date_str,),
+        ).fetchone()[0]
+    return count > 0
+
+
+def update_watchlist_rank(
+    ticker: str,
+    session_date: date,
+    rank: int,
+    db_path: str = DB_PATH,
+) -> None:
+    """Update the rank of a watchlist entry (called after Phase 2 to record final provisional rank)."""
+    init_db(db_path)
+    date_str = session_date.isoformat()
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE watchlist SET rank = ? WHERE session_date = ? AND ticker = ?",
+            (rank, date_str, ticker),
+        )
 
 
 # ---------------------------------------------------------------------------
