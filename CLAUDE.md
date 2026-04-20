@@ -197,3 +197,10 @@ alerts. The startup summary prints `watching without signals (no entry range)` f
 - The OAuth1 session token is persisted to `./data/session.json` after login and reloaded
   automatically by `get_session()` / `is_logged_in()`. Sessions expire 115 minutes after the
   original login wall-clock time regardless of restarts.
+- **Extended hours (pre-market / after-hours):** `All.lastTrade` equals `previousClose` and
+  is stale until the regular session opens. Live pre-market/after-hours price is in the nested
+  `All.ExtendedHourQuoteDetail` object — fields: `lastPrice`, `change`, `percentChange`,
+  `bid`, `ask`, `volume`, `quoteStatus` (e.g. `"EH_REALTIME"`). `get_quote_data()` and
+  `watcher._update_state()` both prefer `ExtendedHourQuoteDetail.lastPrice` over `lastTrade`.
+  The returned dict includes `extended_hours: True`, `eh_status`, and `eh_change_pct` when
+  the extended-hours block is present.
