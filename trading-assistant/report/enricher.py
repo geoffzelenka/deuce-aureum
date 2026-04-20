@@ -37,8 +37,19 @@ def get_quote_data(ticker: str, etrade_session) -> dict:
         if not quote_data:
             return {}
         all_data = quote_data[0].get("All", {})
-        return {
-            "last_price": all_data.get("lastTrade") or all_data.get("last") or all_data.get("lastPrice"),
+
+        # During extended hours (pre-market / after-hours) E*TRADE returns a
+        # nested ExtendedHourQuoteDetail object.  lastTrade reflects the prior
+        # session close, so we prefer the extended-hours lastPrice when present.
+        eh = all_data.get("ExtendedHourQuoteDetail") or {}
+        eh_price = eh.get("lastPrice")
+        eh_status = eh.get("quoteStatus", "")  # e.g. "EH_REALTIME"
+
+        regular_last = all_data.get("lastTrade") or all_data.get("last") or all_data.get("lastPrice")
+        last_price = eh_price if eh_price else regular_last
+
+        result = {
+            "last_price": last_price,
             "bid": all_data.get("bid"),
             "ask": all_data.get("ask"),
             "volume": all_data.get("totalVolume") or all_data.get("volume"),
@@ -46,6 +57,11 @@ def get_quote_data(ticker: str, etrade_session) -> dict:
             "day_low": all_data.get("low"),
             "prev_close": all_data.get("previousClose"),
         }
+        if eh_price:
+            result["extended_hours"] = True
+            result["eh_status"] = eh_status
+            result["eh_change_pct"] = eh.get("percentChange")
+        return result
     except Exception as exc:
         return {"error": f"Quote request failed for {ticker}: {str(exc)[:120]}"}
 

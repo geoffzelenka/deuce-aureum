@@ -126,12 +126,17 @@ def _fetch_quotes(session, symbols: list[str]) -> list[dict]:
 
 
 def _update_state(state: TickerState, quote: dict) -> None:
-    """Apply fresh QuoteData to a TickerState (price, bid, ask, volume, rolling window)."""
+    """Apply fresh QuoteData to a TickerState (price, bid, ask, volume, rolling window).
+
+    During extended hours (pre-market / after-hours), lastTrade reflects the
+    prior session close.  Prefer ExtendedHourQuoteDetail.lastPrice when present.
+    """
     all_data = quote.get("All", {})
     now = time.monotonic()
     cutoff = now - ROLLING_WINDOW_SECONDS
 
-    raw_price = all_data.get("lastTrade") or all_data.get("last") or all_data.get("lastPrice")
+    eh = all_data.get("ExtendedHourQuoteDetail") or {}
+    raw_price = eh.get("lastPrice") or all_data.get("lastTrade") or all_data.get("last") or all_data.get("lastPrice")
     if raw_price is not None:
         state.last_price = float(raw_price)
         state.rolling.append((now, state.last_price))
