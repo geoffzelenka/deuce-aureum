@@ -539,12 +539,36 @@ def _parse_json_response(text: str) -> dict:
         inner = lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
         stripped = "\n".join(inner).strip()
 
-    # If the text still doesn't start with {, find the first { and parse from there
-    brace = stripped.find("{")
-    if brace > 0:
-        stripped = stripped[brace:]
+    # Find the first { and extract the matching JSON object by tracking brace depth.
+    # This handles trailing prose or multiple JSON blocks in the response.
+    start = stripped.find("{")
+    if start < 0:
+        raise ValueError("No JSON object found in response")
+    depth = 0
+    in_string = False
+    escape_next = False
+    end = start
+    for i, ch in enumerate(stripped[start:], start):
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\" and in_string:
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
 
-    return json.loads(stripped)
+    return json.loads(stripped[start : end + 1])
 
 
 def _parse_final_report(response) -> dict:

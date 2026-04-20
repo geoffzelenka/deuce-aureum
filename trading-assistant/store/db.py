@@ -137,21 +137,18 @@ def save_watchlist(candidates: list[dict], session_date: date, db_path: str = DB
     Persist pre-market scan candidates to the watchlist table.
 
     Each dict must have 'ticker'; optional fields: 'rank', 'catalyst',
-    'pre_market_score'.  Uses INSERT OR REPLACE so re-running kickoff
-    on the same day overwrites stale data.
+    'pre_market_score'.  Clears all existing entries for the day first so
+    re-running kickoff always produces a clean slate with no stale rows.
     """
     init_db(db_path)
     date_str = session_date.isoformat()
     with _connect(db_path) as conn:
+        conn.execute("DELETE FROM watchlist WHERE session_date = ?", (date_str,))
         for i, c in enumerate(candidates):
             conn.execute(
                 """
                 INSERT INTO watchlist (session_date, ticker, rank, catalyst, pre_market_score)
                 VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(session_date, ticker) DO UPDATE SET
-                    rank             = excluded.rank,
-                    catalyst         = excluded.catalyst,
-                    pre_market_score = excluded.pre_market_score
                 """,
                 (
                     date_str,
