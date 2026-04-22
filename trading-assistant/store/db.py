@@ -217,10 +217,18 @@ def update_watchlist_rank(
     rank: int,
     db_path: str = DB_PATH,
 ) -> None:
-    """Update the rank of a watchlist entry (called after Phase 2 to record final provisional rank)."""
+    """Update the rank of a watchlist entry (called after Phase 2 to record final provisional rank).
+
+    Bumps any other ticker already at the target rank out of the top-3 range
+    (rank += 100) so Phase 1 candidates never collide with Phase 2 winners.
+    """
     init_db(db_path)
     date_str = session_date.isoformat()
     with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE watchlist SET rank = rank + 100 WHERE session_date = ? AND rank = ? AND ticker != ?",
+            (date_str, rank, ticker),
+        )
         conn.execute(
             "UPDATE watchlist SET rank = ? WHERE session_date = ? AND ticker = ?",
             (rank, date_str, ticker),
