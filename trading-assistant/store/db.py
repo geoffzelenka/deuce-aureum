@@ -100,19 +100,15 @@ def get_todays_headlines(db_path: str = DB_PATH) -> list[str]:
 
 
 def upsert_positions(rows: list[dict], db_path: str = DB_PATH) -> None:
-    """Insert or replace positions keyed by ticker."""
+    """Replace all positions with the given rows (positions.txt is the source of truth)."""
     init_db(db_path)
     with _connect(db_path) as conn:
+        conn.execute("DELETE FROM positions")
         for row in rows:
             conn.execute(
                 """
                 INSERT INTO positions (ticker, name, shares, avg_cost, notes)
                 VALUES (:ticker, :name, :shares, :avg_cost, :notes)
-                ON CONFLICT(ticker) DO UPDATE SET
-                    name     = excluded.name,
-                    shares   = excluded.shares,
-                    avg_cost = excluded.avg_cost,
-                    notes    = excluded.notes
                 """,
                 row,
             )
