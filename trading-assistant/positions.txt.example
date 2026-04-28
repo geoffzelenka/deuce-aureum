@@ -1,0 +1,4 @@
+#ticker, name, shares, avg_cost, notes
+AAPL, Apple, 10, 150.00
+MSFT, Microsoft, 5, 300.00, long-term hold
+NVDA, Nvidia, 12, 136.14

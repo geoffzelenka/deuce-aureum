@@ -1,3 +1,11 @@
+# Trading assistant private data
+trading-assistant/positions.txt
+trading-assistant/*.swp
+trading-assistant/headlines/
+trading-assistant/reports/
+trading-assistant/data/
+trading-assistant/logs/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
