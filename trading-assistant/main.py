@@ -184,10 +184,8 @@ def cmd_midmorning(args) -> None:
     from report.html_writer import write_html_report
 
     etrade_session = None
-    try:
-        etrade_session = get_session()
-    except RuntimeError:
-        pass  # run without live data if not authenticated
+    if not args.skip_auth:
+        etrade_session = get_session()  # raises RuntimeError if not logged in / expired
 
     done = threading.Event()
 
@@ -299,6 +297,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--debug",
         action="store_true",
         help="Log full Claude conversation to logs/midmorning_conversation_{date}.log",
+    )
+    p_midmorning.add_argument(
+        "--skip-auth",
+        action="store_true",
+        help="Skip E*TRADE session check (run without live data)",
     )
 
     return parser

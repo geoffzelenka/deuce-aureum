@@ -34,6 +34,7 @@ python main.py kickoff --skip-auth --headlines headlines/2026-04-10.txt --positi
 python main.py kickoff --no-monitor --headlines headlines/2026-04-10.txt  # Flask only, no watcher
 python main.py kickoff --debug --headlines headlines/2026-04-10.txt --positions positions.txt
 python main.py midmorning                  # 10:30 AM assessment (requires kickoff first)
+python main.py midmorning --skip-auth      # run without live E*TRADE data
 python main.py midmorning --debug          # log full Claude conversation to logs/midmorning_conversation_{date}.log
 python main.py report
 python main.py report --debug              # log full Claude conversation to logs/report_conversation_{date}.log
