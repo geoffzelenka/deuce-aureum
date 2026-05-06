@@ -179,6 +179,43 @@ def session_remaining_seconds() -> Optional[int]:
     return max(0, int(remaining))
 
 
+def renew_session() -> bool:
+    """
+    Extend the current session via GET /oauth/renew_access_token.
+
+    Resets the local expiry clock on success. Returns True if E*TRADE
+    accepted the renewal, False if it rejected it (e.g. outside market hours
+    or the token is already expired on their side). Raises RuntimeError if
+    there is no session in memory to renew.
+    """
+    global _login_timestamp
+
+    if _access_token is None:
+        _load_session()
+    if _access_token is None:
+        raise RuntimeError("Not logged in — no session to renew.")
+
+    session = OAuth1Session(
+        config.ETRADE_CONSUMER_KEY,
+        client_secret=config.ETRADE_CONSUMER_SECRET,
+        resource_owner_key=_access_token,
+        resource_owner_secret=_access_token_secret,
+    )
+    try:
+        resp = session.get(
+            f"{config.BASE_URL}/oauth/renew_access_token",
+            timeout=10,
+        )
+    except Exception:
+        return False
+
+    if resp.status_code == 200:
+        _login_timestamp = time.monotonic()
+        _save_session()
+        return True
+    return False
+
+
 def start_login() -> str:
     """
     Begin the OAuth1 three-legged flow (web variant).

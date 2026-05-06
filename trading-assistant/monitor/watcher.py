@@ -20,7 +20,7 @@ from datetime import date
 from typing import Optional
 
 import config
-from auth.etrade_auth import get_session
+from auth.etrade_auth import get_session, renew_session, session_remaining_seconds
 from alerts.notifier import send_alert
 
 # ---------------------------------------------------------------------------
@@ -40,6 +40,7 @@ STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "1.0"))
 
 ROLLING_WINDOW_SECONDS = 5 * 60  # 5-minute high/low window
 VOLUME_PERIODS = 5               # ticks used for volume moving average
+RENEW_THRESHOLD_SECONDS = 30 * 60  # auto-renew when < 30 minutes remain
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +348,12 @@ def watch(
         while True:
             tick_start = time.monotonic()
             try:
+                remaining = session_remaining_seconds()
+                if remaining is not None and remaining < RENEW_THRESHOLD_SECONDS:
+                    if renew_session():
+                        print(f"  [info] Session renewed — good for another 115 minutes.")
+                    else:
+                        print(f"  [warn] Session renewal failed — {remaining // 60} min remaining.")
                 session = get_session()
                 quotes = _fetch_quotes(session, symbols)
                 for qd in quotes:

@@ -117,6 +117,16 @@ def api_unmute():
     return jsonify({"unmuted": ticker})
 
 
+@app.route("/api/renew", methods=["POST"])
+def api_renew():
+    from auth.etrade_auth import renew_session
+    try:
+        success = renew_session()
+        return jsonify({"success": success})
+    except RuntimeError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+
+
 @app.route("/api/login", methods=["POST"])
 def api_login():
     from auth.etrade_auth import start_login, complete_login

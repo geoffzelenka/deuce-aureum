@@ -68,6 +68,7 @@ Dashboard runs at `http://localhost:5000` by default. Override port with `WEB_PO
 - `POST /api/login` — two-step OAuth1 login:
   - empty body → `{"auth_url": "..."}` (step 1: get authorization URL)
   - `{"verifier": "..."}` → `{"success": true}` (step 2: complete login)
+- `POST /api/renew` — renew the E*TRADE session token (resets expiry to +115 min); returns `{"success": true/false}`
 - `GET /api/muted` — list of currently muted tickers
 - `POST /api/mute` — `{"ticker": "AAPL"}` → silence alerts for that ticker (in-memory, clears on restart)
 - `POST /api/unmute` — `{"ticker": "AAPL"}` → re-enable alerts
@@ -198,6 +199,10 @@ alerts. The startup summary prints `watching without signals (no entry range)` f
 - The OAuth1 session token is persisted to `./data/session.json` after login and reloaded
   automatically by `get_session()` / `is_logged_in()`. Sessions expire 115 minutes after the
   original login wall-clock time regardless of restarts.
+- **Session renewal:** Call `renew_session()` (or `POST /api/renew`) to extend a live session
+  by another 115 minutes without re-authenticating. Works only during market hours; returns
+  `False` (never raises) if E*TRADE rejects the renewal. The watcher auto-renews when fewer
+  than 30 minutes remain.
 - **Extended hours (pre-market / after-hours):** `All.lastTrade` equals `previousClose` and
   is stale until the regular session opens. Live pre-market/after-hours price is in the nested
   `All.ExtendedHourQuoteDetail` object — fields: `lastPrice`, `change`, `percentChange`,
