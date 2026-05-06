@@ -147,11 +147,17 @@ def cmd_kickoff(args) -> None:
 
     n_headlines = 0
     if args.headlines:
+        if not os.path.isfile(args.headlines):
+            print(f"Error: headlines file not found: {args.headlines}", file=sys.stderr)
+            sys.exit(1)
         lines = parse_headlines_file(args.headlines)
         n_headlines = insert_headlines(lines, date.today())
 
     n_positions = 0
     if args.positions:
+        if not os.path.isfile(args.positions):
+            print(f"Error: positions file not found: {args.positions}", file=sys.stderr)
+            sys.exit(1)
         rows = parse_positions_file(args.positions)
         upsert_positions(rows)
         n_positions = len(rows)
