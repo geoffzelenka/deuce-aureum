@@ -151,6 +151,7 @@ def cmd_kickoff(args) -> None:
             print(f"Error: headlines file not found: {args.headlines}", file=sys.stderr)
             sys.exit(1)
         lines = parse_headlines_file(args.headlines)
+        print(f"Read {len(lines)} headlines from {args.headlines}.")
         n_headlines = insert_headlines(lines, date.today())
 
     n_positions = 0
