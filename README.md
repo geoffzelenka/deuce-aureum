@@ -33,6 +33,9 @@ Optional `.env` values:
 | `PROFIT_TARGET_PCT` | `2.0` | Exit signal: % gain above entry_low |
 | `STOP_LOSS_PCT` | `1.0` | Exit signal: % loss below entry_low |
 | `WEB_PORT` | `5000` | Web dashboard port |
+| `SCAN_MODEL` | `claude-fable-5` | Model for Phase 1 candidate identification |
+| `RESEARCH_MODEL` | `claude-opus-4-8` | Model for the Phase 2 tool-call research loop |
+| `REPORT_MODEL` | `claude-fable-5` | Model for final report generation and ranking |
 
 ---
 

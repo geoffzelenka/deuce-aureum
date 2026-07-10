@@ -89,6 +89,16 @@ implementations live in `report/enricher.py`.
   ratio, largest single trade, `unusual_activity` flag (True if ratio outside
   0.4–1.8 or any trade premium > $500k)
 
+**Model routing is per-phase**, configured in `config.py` and overridable via `.env`:
+`SCAN_MODEL` (default `claude-fable-5`) for Phase 1 candidate identification,
+`RESEARCH_MODEL` (default `claude-opus-4-8`) for the Phase 2 tool-call loop, and
+`REPORT_MODEL` (default `claude-fable-5`) for the forced final completion once
+the global tool-call budget is exhausted. `report/midmorning.py` reuses the same
+`RESEARCH_MODEL`/`REPORT_MODEL` routing via `_run_research_phase()` (it has no
+Phase 1, so `SCAN_MODEL` doesn't apply there). Both `generate_report()` and
+`run_midmorning_assessment()` print `"Models: scan=..., research=..., report=..."`
+at the start of the run.
+
 **`session_type` controls which tools are offered:**
 - `"premarket"` (default) — `get_quote` + `get_technicals` only; `get_options_flow`
   is removed from the tools list entirely so Claude cannot call it
