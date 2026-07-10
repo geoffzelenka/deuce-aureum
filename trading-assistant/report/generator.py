@@ -44,6 +44,27 @@ if not _tool_logger.handlers:
     _tool_logger.setLevel(logging.INFO)
 
 
+def _api_call_with_retry(fn, max_retries: int = 4, base_delay: float = 5.0):
+    """Retry an Anthropic API call on transient 529 overloaded errors."""
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except anthropic.OverloadedError:
+            if attempt == max_retries - 1:
+                raise
+            delay = base_delay * (2 ** attempt)
+            print(f"  [warn] Anthropic API overloaded (529); retrying in {delay:.0f}s (attempt {attempt + 1}/{max_retries})")
+            time.sleep(delay)
+        except anthropic.AuthenticationError as e:
+            raise RuntimeError(
+                "Anthropic API key is invalid or missing — check ANTHROPIC_API_KEY in .env"
+            ) from e
+        except anthropic.PermissionDeniedError as e:
+            raise RuntimeError(
+                "Anthropic API returned 403 — check your credit balance at console.anthropic.com/settings/billing"
+            ) from e
+
+
 def _conversation_log_path(prefix: str = "report") -> str:
     return f"./logs/{prefix}_conversation_{date.today().strftime('%Y-%m-%d')}.log"
 
@@ -603,13 +624,13 @@ def _run_research_phase(
     total_calls = 0
 
     while True:
-        response = client.messages.create(
+        response = _api_call_with_retry(lambda: client.messages.create(
             model="claude-opus-4-5",
             max_tokens=4096,
             system=system_prompt,
             tools=tools,
             messages=list(messages),
-        )
+        ))
         messages.append({"role": "assistant", "content": response.content})
 
         if debug and conversation_log_path:
@@ -702,13 +723,13 @@ def _run_research_phase(
                     "text": "Research budget exhausted. Produce the final JSON report now.",
                 }],
             })
-            final = client.messages.create(
+            final = _api_call_with_retry(lambda: client.messages.create(
                 model="claude-opus-4-5",
                 max_tokens=4096,
                 system=system_prompt,
                 tools=[],
                 messages=list(messages),
-            )
+            ))
             messages.append({"role": "assistant", "content": final.content})
             if debug and conversation_log_path:
                 _write_conversation_log(
@@ -769,14 +790,14 @@ def generate_report(
     # -----------------------------------------------------------------------
     messages: list[dict] = [_build_initial_user_message(headlines_text, positions)]
 
-    scan_response = client.messages.create(
+    scan_response = _api_call_with_retry(lambda: client.messages.create(
         model="claude-opus-4-5",
         max_tokens=2048,
         system=system_prompt,
         tools=tools,
         tool_choice={"type": "none"},
         messages=list(messages),
-    )
+    ))
     messages.append({"role": "assistant", "content": scan_response.content})
 
     if debug:
