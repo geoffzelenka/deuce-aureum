@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 import anthropic
+from anthropic._exceptions import OverloadedError
 from dotenv import load_dotenv
 
 import config
@@ -49,7 +50,7 @@ def _api_call_with_retry(fn, max_retries: int = 4, base_delay: float = 5.0):
     for attempt in range(max_retries):
         try:
             return fn()
-        except anthropic.OverloadedError:
+        except OverloadedError:
             if attempt == max_retries - 1:
                 raise
             delay = base_delay * (2 ** attempt)
