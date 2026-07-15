@@ -14,6 +14,7 @@ from datetime import date, datetime
 import anthropic
 from dotenv import load_dotenv
 
+import config
 from store import db
 from report.generator import (
     _ALL_TOOLS,
@@ -194,6 +195,11 @@ def run_midmorning_assessment(etrade_session=None, debug: bool = False) -> dict:
         The parsed mid-morning report dict.
     """
     today = date.today()
+
+    print(
+        f"Models: scan={config.SCAN_MODEL}, research={config.RESEARCH_MODEL}, "
+        f"report={config.REPORT_MODEL}"
+    )
 
     # Step 1 — ensure pre-market ran first
     if not db.watchlist_exists(today):

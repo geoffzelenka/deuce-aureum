@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 import anthropic
+from anthropic._exceptions import OverloadedError
 from dotenv import load_dotenv
 
 import config
@@ -49,7 +50,7 @@ def _api_call_with_retry(fn, max_retries: int = 4, base_delay: float = 5.0):
     for attempt in range(max_retries):
         try:
             return fn()
-        except anthropic.OverloadedError:
+        except OverloadedError:
             if attempt == max_retries - 1:
                 raise
             delay = base_delay * (2 ** attempt)
@@ -625,7 +626,7 @@ def _run_research_phase(
 
     while True:
         response = _api_call_with_retry(lambda: client.messages.create(
-            model="claude-opus-4-5",
+            model=config.RESEARCH_MODEL,
             max_tokens=4096,
             system=system_prompt,
             tools=tools,
@@ -724,7 +725,7 @@ def _run_research_phase(
                 }],
             })
             final = _api_call_with_retry(lambda: client.messages.create(
-                model="claude-opus-4-5",
+                model=config.REPORT_MODEL,
                 max_tokens=4096,
                 system=system_prompt,
                 tools=[],
@@ -779,6 +780,11 @@ def generate_report(
     system_prompt = _build_system_prompt(session_type)
     tools = _PREMARKET_TOOLS if session_type == "premarket" else _ALL_TOOLS
 
+    print(
+        f"Models: scan={config.SCAN_MODEL}, research={config.RESEARCH_MODEL}, "
+        f"report={config.REPORT_MODEL}"
+    )
+
     if debug:
         log_path = _conversation_log_path("report")
         print(f"  [debug] conversation log → {log_path}")
@@ -791,7 +797,7 @@ def generate_report(
     messages: list[dict] = [_build_initial_user_message(headlines_text, positions)]
 
     scan_response = _api_call_with_retry(lambda: client.messages.create(
-        model="claude-opus-4-5",
+        model=config.SCAN_MODEL,
         max_tokens=2048,
         system=system_prompt,
         tools=tools,

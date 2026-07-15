@@ -13,3 +13,9 @@ if _env not in ("sandbox", "production"):
 BASE_URL = (
     "https://apisb.etrade.com" if _env == "sandbox" else "https://api.etrade.com"
 )
+
+# Per-phase model routing for report generation (report/generator.py, report/midmorning.py).
+# Override in .env to A/B test models without touching code.
+SCAN_MODEL = os.getenv("SCAN_MODEL", "claude-fable-5")
+RESEARCH_MODEL = os.getenv("RESEARCH_MODEL", "claude-opus-4-8")
+REPORT_MODEL = os.getenv("REPORT_MODEL", "claude-fable-5")
